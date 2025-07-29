@@ -17,13 +17,16 @@ import tempfile
 # Vector database and embeddings
 import pinecone
 from pinecone import Pinecone, ServerlessSpec
-import google.generativeai as genai
 import numpy as np
 from FlagEmbedding import BGEM3FlagModel
 
 # Text processing
 from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# OpenAI integration
+import openai
+from openai import OpenAI
 
 # Environment variables
 from dotenv import load_dotenv
@@ -37,12 +40,12 @@ logger = logging.getLogger(__name__)
 embedding_model = None
 pinecone_client = None
 pinecone_index = None
-gemini_model = None
+openai_client = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown"""
-    global embedding_model, pinecone_client, pinecone_index, gemini_model
+    global embedding_model, pinecone_client, pinecone_index, openai_client
     
     try:
         # Initialize embedding model
@@ -60,10 +63,11 @@ async def lifespan(app: FastAPI):
         index_name = os.getenv("PINECONE_INDEX_NAME","test")
         pinecone_index = pinecone_client.Index(index_name)
         
-        # Initialize Gemini
-        logger.info("Initializing Gemini 2.0 Flash...")
-        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+        # Initialize OpenAI client
+        logger.info("Initializing OpenAI GPT-4...")
+        openai_client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
         
         logger.info("All services initialized successfully")
         yield
@@ -252,33 +256,25 @@ class VectorStore:
             logger.error(f"Failed to clear namespace: {e}")
 
 class LLMProcessor:
-    """Handle LLM interactions using Gemini 2.0 Flash"""
+    """Handle LLM interactions using OpenAI GPT-4"""
     
-    def __init__(self, model_name: str = "gemini-2.0-flash-exp"):
+    def __init__(self, model_name: str = "gpt-4o"):
         self.model_name = model_name
-        self.prompt_template = '''You are a helpful insurance assistant. For each user question below, answer using ONLY the provided context.
+        self.system_prompt = '''You are a helpful insurance assistant. For each user question, answer using ONLY the provided context.
 ⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
 ❌ Do not invent any facts.  
-✅ If the context does not answer the question, say "I'm sorry I couldn't find it in the document. "
+✅ If the context does not answer the question, say "I'm sorry I couldn't find it in the document."
 
-Context:
-{context}
-
-Questions:
-{questions}
-
-Respond in **valid JSON** like this:
-```json
-{{
+Respond in **valid JSON** format like this:
+{
   "answers": [
     "Short answer to question 1.",
     "Short answer to question 2."
   ]
-}}
-```'''
+}'''
     
     def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
-        """Generate answers for multiple questions using Gemini"""
+        """Generate answers for multiple questions using OpenAI GPT-4"""
         try:
             # Prepare context
             context = "\n\n".join([f"Context {i+1}:\n{chunk}" for i, chunk in enumerate(context_chunks)])
@@ -286,25 +282,27 @@ Respond in **valid JSON** like this:
             # Prepare questions list
             questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
             
-            # Create prompt using template
-            prompt = self.prompt_template.format(
-                context=context,
-                questions=questions_text
-            )
+            # Create user message
+            user_message = f"""Context:
+{context}
 
-            # Make API call to Gemini
-            response = gemini_model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=1000,
-                    temperature=0.1,
-                    top_p=0.8,
-                    top_k=10
-                )
+Questions:
+{questions_text}"""
+
+            # Make API call to OpenAI GPT-4
+            response = openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                max_tokens=1000,
+                temperature=0.1,
+                top_p=0.8
             )
             
-            response_text = response.text.strip()
-            logger.info(f"Generated answers for {len(questions)} questions using Gemini")
+            response_text = response.choices[0].message.content.strip()
+            logger.info(f"Generated answers for {len(questions)} questions using OpenAI GPT-4")
             
             # Try to extract JSON from response
             try:
@@ -321,7 +319,8 @@ Respond in **valid JSON** like this:
                     if json_match:
                         json_str = json_match.group(0)
                     else:
-                        raise ValueError("No JSON found in response")
+                        # If no JSON brackets found, assume the whole response is JSON
+                        json_str = response_text
                 
                 parsed_response = json.loads(json_str)
                 
@@ -359,7 +358,7 @@ Respond in **valid JSON** like this:
                 return answers[:len(questions)]
             
         except Exception as e:
-            logger.error(f"Failed to generate answers with Gemini: {e}")
+            logger.error(f"Failed to generate answers with OpenAI GPT-4: {e}")
             return [f"I apologize, but I encountered an error while processing your question: {str(e)}" for _ in questions]
 
 # Initialize processors
