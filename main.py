@@ -296,7 +296,7 @@ Questions:
                     {"role": "user", "content": user_message}
                 ],
                 max_tokens=1000,
-                temperature=0.1,
+                temperature=0,
                 top_p=0.8
             )
             
