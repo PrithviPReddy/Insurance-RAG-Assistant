@@ -18,7 +18,6 @@ import tempfile
 import pinecone
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
-from FlagEmbedding import BGEM3FlagModel
 
 # Text processing
 from sentence_transformers import SentenceTransformer
@@ -263,7 +262,7 @@ class LLMProcessor:
         self.system_prompt = '''You are a helpful insurance assistant. For each user question, answer using ONLY the provided context.
 ⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
 ❌ Do not invent any facts.  
-✅ If the context does not answer the question, say "I'm sorry I couldn't find it in the document."
+✅ If the context does not answer the question, just think and reason and give the most relavent answer in max 3 lines"
 
 Respond in **valid JSON** format like this:
 {
