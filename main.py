@@ -1,3 +1,4 @@
+# main.py
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, HttpUrl
@@ -261,7 +262,7 @@ class LLMProcessor:
         self.system_prompt = '''You are a helpful insurance assistant. For each user question, answer using ONLY the provided context.
 ⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
 ❌ Do not invent any facts.  
-✅ If the context does not answer the question, just think and reason and give the most relavent answer in max 3 lines"
+✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines"
 
 Respond in **valid JSON** format like this:
 {
