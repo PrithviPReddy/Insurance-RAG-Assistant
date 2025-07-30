@@ -10,32 +10,32 @@ from pathlib import Path
 import logging
 from contextlib import asynccontextmanager
 
-# PDF processing
+# pdf processing
 from langchain.document_loaders import PyPDFLoader
 import tempfile
 
-# Vector database and embeddings
+# vector database and embeddings
 import pinecone
 from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 
-# Text processing
+# text processing
 from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-# OpenAI integration
+# openAI integration
 import openai
 from openai import OpenAI
 
-# Environment variables
+# environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
-# Configure logging
+# configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global variables for models and clients
+# global variables for models and clients
 embedding_model = None
 pinecone_client = None
 pinecone_index = None
@@ -47,22 +47,22 @@ async def lifespan(app: FastAPI):
     global embedding_model, pinecone_client, pinecone_index, openai_client
     
     try:
-        # Initialize embedding model
+        # initialize embedding model
         logger.info("Loading embedding model...")
         embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
        
-        # Initialize Pinecone client
+        # initialize Pinecone client
         logger.info("Initializing Pinecone...")
         pinecone_client = Pinecone(
             api_key=os.getenv("PINECONE_API_KEY"),
             environment=os.getenv("PINECONE_ENVIRONMENT")
         )
         
-        # Create or connect to index
+        # create or connect to index
         index_name = os.getenv("PINECONE_INDEX")
         pinecone_index = pinecone_client.Index(index_name)
         
-        # Initialize OpenAI client
+        # initialize OpenAI client
         logger.info("Initializing OpenAI GPT-4...")
         openai_client = OpenAI(
             api_key=os.getenv("OPENAI_API_KEY")
@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("Shutting down services")
 
-# Initialize FastAPI app with lifespan
+# initialize FastAPI app with lifespan
 app = FastAPI(
     title="HackRx RAG API",
     description="RAG system for insurance policy document processing",
@@ -85,10 +85,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Security
+# security
 security = HTTPBearer()
 
-# Pydantic models
+# pydantic models
 class ProcessRequest(BaseModel):
     documents: HttpUrl
     questions: List[str]
@@ -118,9 +118,9 @@ class PDFProcessor:
     def download_and_extract_pdf(url: str) -> str:
         """Download PDF from URL and extract text using LangChain PyPDFLoader"""
         try:
-            # Create temporary file for PDF
+            # create temporary file for PDF
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-                # Download PDF
+                # download PDF
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
@@ -130,16 +130,16 @@ class PDFProcessor:
                 if 'application/pdf' not in response.headers.get('content-type', ''):
                     logger.warning(f"Content type is not PDF: {response.headers.get('content-type')}")
                 
-                # Write PDF content to temp file
+                # write PDF content to temp file
                 temp_file.write(response.content)
                 temp_file_path = temp_file.name
             
             try:
-                # Use LangChain PyPDFLoader to extract text
+                # use LangChain PyPDFLoader to extract text
                 loader = PyPDFLoader(temp_file_path)
                 pages = loader.load()
                 
-                # Combine all pages
+                # combine all pages
                 text = ""
                 for i, page in enumerate(pages):
                     text += f"\n--- Page {i + 1} ---\n{page.page_content}"
@@ -150,7 +150,7 @@ class PDFProcessor:
                 return text.strip()
             
             finally:
-                # Clean up temporary file
+                # clean up temporary file
                 try:
                     os.unlink(temp_file_path)
                 except:
@@ -175,7 +175,7 @@ class TextChunker:
         """Split text into overlapping chunks using LangChain"""
         try:
             chunks = self.text_splitter.split_text(text)
-            # Filter out very short chunks
+            # filter out very short chunks
             filtered_chunks = [chunk for chunk in chunks if len(chunk.strip()) > 50]
             logger.info(f"Created {len(filtered_chunks)} chunks from text")
             return filtered_chunks
@@ -192,10 +192,10 @@ class VectorStore:
     def add_documents(self, chunks: List[str]):
         """Add document chunks to Pinecone vector store"""
         try:
-            # Generate embeddings
+            # generate embeddings
             embeddings = embedding_model.encode(chunks)
             
-            # Prepare vectors for upsert
+            # prepare vectors for upsert
             vectors = []
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 vectors.append({
@@ -208,7 +208,7 @@ class VectorStore:
                     }
                 })
             
-            # Upsert vectors to Pinecone
+            # upsert vectors to Pinecone
             pinecone_index.upsert(
                 vectors=vectors,
                 namespace=self.namespace
@@ -222,10 +222,10 @@ class VectorStore:
     def search(self, query: str, n_results: int = 5) -> List[str]:
         """Search for relevant chunks in Pinecone"""
         try:
-            # Generate query embedding
+            # generate query embedding
             query_embedding = embedding_model.encode([query])[0].tolist()
             
-            # Search in Pinecone
+            # search in Pinecone
             results = pinecone_index.query(
                 vector=query_embedding,
                 top_k=n_results,    
@@ -233,7 +233,7 @@ class VectorStore:
                 include_metadata=True
             )
             
-            # Extract documents from results
+            # extract documents from results
             documents = []
             for match in results.matches:
                 if 'text' in match.metadata:
@@ -274,20 +274,20 @@ Respond in **valid JSON** format like this:
     def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
         """Generate answers for multiple questions using OpenAI GPT-4"""
         try:
-            # Prepare context
+            # prepare context
             context = "\n\n".join([f"Context {i+1}:\n{chunk}" for i, chunk in enumerate(context_chunks)])
             
-            # Prepare questions list
+            # prepare questions list
             questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
             
-            # Create user message
+            # create user message
             user_message = f"""Context:
 {context}
 
 Questions:
 {questions_text}"""
 
-            # Make API call to OpenAI GPT-4
+            # make API call to OpenAI GPT-4
             response = openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
@@ -302,29 +302,29 @@ Questions:
             response_text = response.choices[0].message.content.strip()
             logger.info(f"Generated answers for {len(questions)} questions using OpenAI GPT-4")
             
-            # Try to extract JSON from response
+            # try to extract JSON from response
             try:
                 import json
                 import re
                 
-                # Extract JSON from markdown code block if present
+                # extract JSON from markdown code block if present
                 json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(1)
                 else:
-                    # Try to find JSON object in response
+                    # try to find JSON object in response
                     json_match = re.search(r'\{.*?"answers"\s*:\s*\[.*?\].*?\}', response_text, re.DOTALL)
                     if json_match:
                         json_str = json_match.group(0)
                     else:
-                        # If no JSON brackets found, assume the whole response is JSON
+                        # if no JSON brackets found, assume the whole response is JSON
                         json_str = response_text
                 
                 parsed_response = json.loads(json_str)
                 
                 if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
                     answers = parsed_response["answers"]
-                    # Ensure we have the right number of answers
+                    # ensure we have the right number of answers
                     while len(answers) < len(questions):
                         answers.append("Not mentioned in the document.")
                     return answers[:len(questions)]  # Trim to exact number needed
@@ -335,21 +335,21 @@ Questions:
                 logger.warning(f"Failed to parse JSON response: {json_error}")
                 logger.warning(f"Raw response: {response_text}")
                 
-                # Fallback: try to extract answers without JSON
+                # fallback: try to extract answers without JSON
                 lines = response_text.split('\n')
                 answers = []
                 for line in lines:
                     line = line.strip()
                     if line and not line.startswith(('Context', 'Questions:', '```', '{', '}', '"answers"')):
-                        # Clean up the line
+                        # clean up the line
                         if line.startswith('"') and line.endswith('",'):
                             line = line[1:-2]
                         elif line.startswith('"') and line.endswith('"'):
                             line = line[1:-1]
-                        if line and len(line) > 10:  # Reasonable answer length
+                        if line and len(line) > 10:  # reasonable answer length
                             answers.append(line)
                 
-                # Ensure we have enough answers
+                # ensure we have enough answers
                 while len(answers) < len(questions):
                     answers.append("Not mentioned in the document.")
                 
@@ -359,13 +359,13 @@ Questions:
             logger.error(f"Failed to generate answers with OpenAI GPT-4: {e}")
             return [f"I apologize, but I encountered an error while processing your question: {str(e)}" for _ in questions]
 
-# Initialize processors
+# initialize processors
 pdf_processor = PDFProcessor()
 text_chunker = TextChunker()
 vector_store = VectorStore()
 llm_processor = LLMProcessor()
 
-# Create router AFTER initializing processors
+# create router AFTER initializing processors
 router = APIRouter(prefix="/api/v1")
 
 @router.post("/hackrx/run", response_model=ProcessResponse)
@@ -377,14 +377,14 @@ async def process_documents(
     try:
         logger.info(f"Processing request with {len(request.questions)} questions")
         
-        # Step 1: Download and extract text from PDF
+        # step 1:download and extract text from PDF
         logger.info(f"Downloading and extracting PDF from: {request.documents}")
         text = pdf_processor.download_and_extract_pdf(str(request.documents))
         
         if len(text) < 100:
             raise HTTPException(status_code=400, detail="Extracted text is too short. PDF may be empty or corrupted.")
         
-        # Step 2: Chunk the text
+        # Step 2:chunk the text
         logger.info("Chunking text")
         chunks = text_chunker.chunk_text(text)
         
@@ -393,38 +393,38 @@ async def process_documents(
         
         logger.info(f"Created {len(chunks)} chunks")
         
-        # Step 3: Store chunks in vector database
+        # Step 3:store chunks in vector database
         logger.info("Storing chunks in Pinecone vector database")
         vector_store.add_documents(chunks)
         
-        # Step 4: Process all questions together
+        # Step 4:process all questions together
         logger.info(f"Processing {len(request.questions)} questions together")
         
-        # Collect relevant chunks for all questions
-        all_relevant_chunks = set()  # Use set to avoid duplicates
+        #collect relevant chunks for all questions
+        all_relevant_chunks = set()  #use set to avoid duplicates
         question_chunks_map = {}
         
         for question in request.questions:
-            relevant_chunks = vector_store.search(question, n_results=3)  # Reduced to 3 per question
+            relevant_chunks = vector_store.search(question, n_results=3)  # reduced to 3 per question
             question_chunks_map[question] = relevant_chunks
             all_relevant_chunks.update(relevant_chunks)
         
-        # Convert back to list and limit total chunks
-        final_chunks = list(all_relevant_chunks)[:10]  # Max 10 chunks total for efficiency
+        #convert back to list and limit total chunks
+        final_chunks = list(all_relevant_chunks)[:10]  #max 10 chunks total for efficiency
         
         if not final_chunks:
-            # If no chunks found, return generic responses
+            #if no chunks found, return generic responses
             answers = ["Not mentioned in the document." for _ in request.questions]
         else:
-            # Generate answers using LLM with batch processing
+            #generate answers using LLM with batch processing
             answers = llm_processor.generate_answers(request.questions, final_chunks)
         
         logger.info(f"Successfully processed all {len(request.questions)} questions")
         
-        # Validate answers format
+        #validate answers format
         if len(answers) != len(request.questions):
             logger.warning(f"Answer count mismatch: {len(answers)} answers for {len(request.questions)} questions")
-            # Pad or trim answers to match questions
+            #pad or trim answers to match questions
             while len(answers) < len(request.questions):
                 answers.append("Not mentioned in the document.")
             answers = answers[:len(request.questions)]
@@ -442,7 +442,7 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "message": "HackRx RAG API is running"}
 
-# Include router in app
+#include router in app
 app.include_router(router)
 
 @app.get("/")
@@ -463,5 +463,5 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
-# To run the code, type this in the cmd:
-# uvicorn main:app --reload --host 0.0.0.0 --port 8000
+#to run the code, type this in the cmd:
+#uvicorn main:app --reload --host 0.0.0.0 --port 8000
