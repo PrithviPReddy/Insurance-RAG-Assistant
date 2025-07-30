@@ -1,5 +1,5 @@
-# main.py
 from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import APIRouter
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, HttpUrl
 from typing import List
@@ -55,11 +55,11 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing Pinecone...")
         pinecone_client = Pinecone(
             api_key=os.getenv("PINECONE_API_KEY"),
-            environment=os.getenv("PINECONE_ENVIRONMENT", "us-east-1-aws")
+            environment=os.getenv("PINECONE_ENVIRONMENT")
         )
         
         # Create or connect to index
-        index_name = os.getenv("PINECONE_INDEX_NAME","test")
+        index_name = os.getenv("PINECONE_INDEX")
         pinecone_index = pinecone_client.Index(index_name)
         
         # Initialize OpenAI client
@@ -96,8 +96,10 @@ class ProcessRequest(BaseModel):
 class ProcessResponse(BaseModel):
     answers: List[str]
 
-# Authentication
-VALID_TOKEN = os.getenv("BEARER_TOKEN", "CustomToken")
+VALID_TOKEN = os.getenv("BEARER_TOKEN")
+
+if not VALID_TOKEN:
+    raise ValueError("BEARER_TOKEN is not set in the environment. Please set it before running the app.")
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Verify Bearer token"""
@@ -192,7 +194,6 @@ class VectorStore:
         try:
             # Generate embeddings
             embeddings = embedding_model.encode(chunks)
-
             
             # Prepare vectors for upsert
             vectors = []
@@ -223,8 +224,6 @@ class VectorStore:
         try:
             # Generate query embedding
             query_embedding = embedding_model.encode([query])[0].tolist()
-
-
             
             # Search in Pinecone
             results = pinecone_index.query(
@@ -366,7 +365,10 @@ text_chunker = TextChunker()
 vector_store = VectorStore()
 llm_processor = LLMProcessor()
 
-@app.post("/hackrx/run", response_model=ProcessResponse)
+# Create router AFTER initializing processors
+router = APIRouter(prefix="/api/v1")
+
+@router.post("/hackrx/run", response_model=ProcessResponse)
 async def process_documents(
     request: ProcessRequest,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token)
@@ -435,10 +437,13 @@ async def process_documents(
         logger.error(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.get("/health")
+@router.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "message": "HackRx RAG API is running"}
+
+# Include router in app
+app.include_router(router)
 
 @app.get("/")
 async def root():
@@ -447,15 +452,16 @@ async def root():
         "message": "HackRx RAG API",
         "version": "1.0.0",
         "endpoints": {
-            "process": "/hackrx/run",
-            "health": "/health"
+            "process": "/api/v1/hackrx/run",
+            "health": "/api/v1/health"
         }
     }
+
+
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
-
-#to run the code , type this in the cmd
-#uvicorn main:app --reload --host 0.0.0.0 --port 8000
+# To run the code, type this in the cmd:
+# uvicorn main:app --reload --host 0.0.0.0 --port 8000
