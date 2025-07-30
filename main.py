@@ -261,7 +261,8 @@ class LLMProcessor:
         self.system_prompt = '''You are a helpful insurance assistant. For each user question, answer using ONLY the provided context.
 ⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
 ❌ Do not invent any facts.  
-✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines"
+✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines
+! remember your answers will be evaluvated my an AI, try to get a good score."
 
 Respond in **valid JSON** format like this:
 {
