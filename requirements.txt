@@ -5,6 +5,7 @@ pydantic
 requests
 python-dotenv
 langchain
+langchain-community
 pypdf
 pinecone-client
 sentence-transformers
