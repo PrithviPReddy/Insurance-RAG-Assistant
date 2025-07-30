@@ -188,63 +188,77 @@ class VectorStore:
     
     def __init__(self):
         self.namespace = "insurance_docs"
-    
+
     def add_documents(self, chunks: List[str]):
         """Add document chunks to Pinecone vector store"""
         try:
-            # generate embeddings
             embeddings = embedding_model.encode(chunks)
-            
-            # prepare vectors for upsert
-            vectors = []
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                vectors.append({
-                    "id": f"chunk_{i}_{hash(chunk) % 1000000}",  # Unique ID
-                    "values": embedding.tolist(),
-                    "metadata": {
-                        "text": chunk,
-                        "chunk_id": i,
-                        "text_length": len(chunk)
-                    }
-                })
-            
-            # upsert vectors to Pinecone
-            pinecone_index.upsert(
-                vectors=vectors,
-                namespace=self.namespace
-            )
-            
+            batch_size = 20
+            total_batches = (len(chunks) + batch_size - 1) // batch_size
+
+            logger.info(f"Processing {len(chunks)} chunks in {total_batches} batches")
+
+            for batch_idx in range(0, len(chunks), batch_size):
+                batch_end = min(batch_idx + batch_size, len(chunks))
+                batch_chunks = chunks[batch_idx:batch_end]
+                batch_embeddings = embeddings[batch_idx:batch_end]
+
+                vectors = []
+                for i, (chunk, embedding) in enumerate(zip(batch_chunks, batch_embeddings)):
+                    vectors.append({
+                        "id": f"chunk_{batch_idx + i}_{hash(chunk) % 1000000}",
+                        "values": embedding.tolist(),
+                        "metadata": {
+                            "text": chunk,
+                            "chunk_id": batch_idx + i,
+                            "text_length": len(chunk)
+                        }
+                    })
+
+                try:
+                    pinecone_index.upsert(vectors=vectors, namespace=self.namespace)
+                    logger.info(f"Processed batch {(batch_idx // batch_size) + 1}/{total_batches}")
+                except Exception as batch_error:
+                    logger.error(f"Failed to upsert batch {batch_idx}: {batch_error}")
+                    sub_batch_size = 5
+                    for sub_idx in range(0, len(vectors), sub_batch_size):
+                        sub_batch = vectors[sub_idx:sub_idx + sub_batch_size]
+                        try:
+                            pinecone_index.upsert(vectors=sub_batch, namespace=self.namespace)
+                            logger.info(f"Processed sub-batch of {len(sub_batch)} vectors")
+                        except Exception as sub_error:
+                            logger.error(f"Failed to upsert sub-batch: {sub_error}")
+                            raise
+
             logger.info(f"Added {len(chunks)} chunks to Pinecone vector store")
+
         except Exception as e:
             logger.error(f"Failed to add documents to Pinecone: {e}")
             raise
-    
+
     def search(self, query: str, n_results: int = 5) -> List[str]:
         """Search for relevant chunks in Pinecone"""
         try:
-            # generate query embedding
             query_embedding = embedding_model.encode([query])[0].tolist()
-            
-            # search in Pinecone
+
             results = pinecone_index.query(
                 vector=query_embedding,
-                top_k=n_results,    
+                top_k=n_results,
                 namespace=self.namespace,
                 include_metadata=True
             )
-            
-            # extract documents from results
+
             documents = []
             for match in results.matches:
                 if 'text' in match.metadata:
                     documents.append(match.metadata['text'])
-            
+
             logger.info(f"Found {len(documents)} relevant chunks for query")
             return documents
         except Exception as e:
             logger.error(f"Failed to search Pinecone: {e}")
             return []
-    
+
     def clear_namespace(self):
         """Clear all vectors in the namespace"""
         try:
@@ -252,6 +266,7 @@ class VectorStore:
             logger.info(f"Cleared namespace: {self.namespace}")
         except Exception as e:
             logger.error(f"Failed to clear namespace: {e}")
+
 
 class LLMProcessor:
     """Handle LLM interactions using OpenAI GPT-4"""
