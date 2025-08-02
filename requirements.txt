@@ -19,3 +19,6 @@ scipy
 scikit-learn
 tokenizers
 huggingface-hub
+sqlalchemy
+psycopg2-binary
+pgvector
