@@ -39,6 +39,9 @@ from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from pgvector.sqlalchemy import Vector
 import uuid
 
+import logging
+from typing import List
+
 # Environment variables
 from dotenv import load_dotenv
 load_dotenv()
@@ -57,6 +60,28 @@ SessionLocal = None
 
 # SQLAlchemy setup
 Base = declarative_base()
+
+
+def log_document_content(content: str, max_chars: int = 1000):
+    """Log first part of document content for debugging"""
+    logger.info(f"📄 Document content preview ({len(content)} total chars):")
+    logger.info(f"First {max_chars} characters:")
+    logger.info("-" * 50)
+    logger.info(content[:max_chars])
+    logger.info("-" * 50)
+
+def log_chunks_preview(chunks: List[str], max_chunks: int = 3):
+    """Log preview of created chunks"""
+    logger.info(f"📦 Created {len(chunks)} chunks. Preview of first {max_chunks}:")
+    for i, chunk in enumerate(chunks[:max_chunks]):
+        logger.info(f"Chunk {i+1} ({len(chunk)} chars): {chunk[:200]}...")
+
+def log_search_results(question: str, chunks: List[str], max_results: int = 2):
+    """Log search results for debugging"""
+    logger.info(f"🔍 Search results for: '{question[:50]}...'")
+    logger.info(f"Found {len(chunks)} relevant chunks:")
+    for i, chunk in enumerate(chunks[:max_results]):
+        logger.info(f"Result {i+1}: {chunk[:150]}...")
 
 # Database Models
 class Document(Base):
@@ -80,7 +105,7 @@ class DocumentChunk(Base):
     document_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(384))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
+    embedding = Column(Vector(1024))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
     created_at = Column(DateTime, default=datetime.utcnow)
 
 @asynccontextmanager
@@ -104,7 +129,7 @@ async def lifespan(app: FastAPI):
         
         # Initialize embedding model
         logger.info("Loading embedding model...")
-        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        embedding_model = SentenceTransformer('BAAI/bge-large-en-v1.5')
        
         # Initialize Pinecone client
         logger.info("Initializing Pinecone...")
@@ -549,10 +574,17 @@ Respond in valid JSON format:
 }'''
     
     def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
-        """Generate answers with improved context handling"""
+        """Generate answers with improved context handling and logging"""
         try:
             # Prepare context with better formatting
             context = self.format_context(context_chunks)
+            
+            # Log what we're sending to LLM
+            logger.info(f"📤 Sending to LLM:")
+            logger.info(f"  - Questions: {len(questions)}")
+            logger.info(f"  - Context chunks: {len(context_chunks)}")
+            logger.info(f"  - Total context length: {len(context)} characters")
+            logger.info(f"  - Model: {self.model_name}")
             
             # Prepare questions
             questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
@@ -566,26 +598,45 @@ QUESTIONS TO ANSWER:
 
 Please answer each question based on the provided context chunks. Look for both direct information and related concepts that can help answer the questions."""
 
+            # Log the actual prompt (truncated)
+            logger.info(f"🔤 LLM Prompt preview (first 500 chars):")
+            logger.info(user_message[:500] + "..." if len(user_message) > 500 else user_message)
+
             # Make API call
+            logger.info("🌐 Making OpenAI API call...")
             response = openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_message}
                 ],
-                max_tokens=2000,  # Increased for longer answers
-                temperature=0.1,  # Slightly higher for more natural responses
+                max_tokens=2000,
+                temperature=0.1,
                 top_p=0.9
             )
             
             response_text = response.choices[0].message.content.strip()
-            logger.info(f"Generated answers for {len(questions)} questions")
+            
+            # Log raw response
+            logger.info(f"📥 Raw LLM Response:")
+            logger.info(response_text)
+            
+            logger.info(f"✅ Generated answers for {len(questions)} questions")
             
             # Parse JSON response
-            return self.parse_response(response_text, questions)
+            parsed_answers = self.parse_response(response_text, questions)
+            
+            # Log parsed answers
+            logger.info(f"📋 Parsed Answers:")
+            for i, answer in enumerate(parsed_answers, 1):
+                logger.info(f"  {i}. {answer}")
+            
+            return parsed_answers
             
         except Exception as e:
-            logger.error(f"Failed to generate answers: {e}")
+            logger.error(f"💥 Failed to generate answers: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return [f"Error processing question: {str(e)}" for _ in questions]
     
     def format_context(self, chunks: List[str]) -> str:
@@ -686,9 +737,16 @@ async def process_documents(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Process documents with enhanced retrieval and answering"""
+    """Process documents with enhanced retrieval and debugging"""
     try:
-        logger.info(f"Processing request with {len(request.questions)} questions")
+        logger.info("=" * 80)
+        logger.info(f"🚀 NEW REQUEST: Processing {len(request.questions)} questions")
+        logger.info(f"📎 Document URL: {str(request.documents)}")
+        logger.info("Questions to answer:")
+        for i, q in enumerate(request.questions, 1):
+            logger.info(f"  {i}. {q}")
+        logger.info("=" * 80)
+        
         url = str(request.documents)
         
         # Step 1: Check cache
@@ -696,56 +754,83 @@ async def process_documents(
         
         if cached_document:
             logger.info(f"✅ Document found in cache with {cached_document.chunk_count} chunks")
+            # Log cached content preview
+            log_document_content(cached_document.content, 500)
         else:
             logger.info("❌ Document not in cache. Processing new document...")
             
             # Extract and process document
+            logger.info("📥 Downloading and extracting PDF...")
             text = pdf_processor.download_and_extract_pdf(url)
+            
+            # Log extracted content
+            log_document_content(text, 1000)
             
             if len(text) < 100:
                 raise HTTPException(status_code=400, detail="Extracted text is too short")
             
             # Enhanced chunking
+            logger.info("✂️ Chunking document...")
             chunks = text_chunker.chunk_text(text)
             
             if not chunks:
                 raise HTTPException(status_code=400, detail="No valid chunks created")
             
-            logger.info(f"Created {len(chunks)} enhanced chunks")
+            # Log chunks preview
+            log_chunks_preview(chunks, 5)
             
             # Save to database
+            logger.info("💾 Saving to database...")
             cached_document = DatabaseManager.save_document(db, url, text, chunks)
             
             # Add to Pinecone fallback
+            logger.info("🌲 Adding to Pinecone fallback...")
             hybrid_vector_store.add_to_pinecone_fallback(chunks)
         
         # Step 2: Enhanced question processing
-        logger.info("Processing questions with enhanced retrieval...")
+        logger.info("🤔 Processing questions with enhanced retrieval...")
         
         # Collect relevant chunks with improved search
         all_relevant_chunks = set()
         
-        for question in request.questions:
-            logger.info(f"Searching for: {question[:50]}...")
+        for i, question in enumerate(request.questions, 1):
+            logger.info(f"\n--- Processing Question {i}/{len(request.questions)} ---")
+            logger.info(f"Question: {question}")
+            
             relevant_chunks = hybrid_vector_store.hybrid_search_enhanced(db, question)
+            
+            # Log search results
+            log_search_results(question, relevant_chunks, 2)
+            
             all_relevant_chunks.update(relevant_chunks[:5])  # Top 5 per question
         
         # Final chunk selection
-        final_chunks = list(all_relevant_chunks)[:20]  # Increased limit for better context
+        final_chunks = list(all_relevant_chunks)[:20]
         
-        logger.info(f"Selected {len(final_chunks)} chunks for context")
+        logger.info(f"\n📋 FINAL CONTEXT: Selected {len(final_chunks)} unique chunks")
+        logger.info("Context preview:")
+        for i, chunk in enumerate(final_chunks[:3]):
+            logger.info(f"Context {i+1}: {chunk[:100]}...")
         
         if not final_chunks:
+            logger.warning("❌ No relevant chunks found!")
             answers = ["No relevant information found in the document." for _ in request.questions]
         else:
             # Generate answers with improved processing
+            logger.info("🧠 Generating answers with LLM...")
             answers = llm_processor.generate_answers(request.questions, final_chunks)
+            
+            # Log generated answers
+            logger.info("📝 Generated answers:")
+            for i, answer in enumerate(answers, 1):
+                logger.info(f"Answer {i}: {answer[:100]}...")
         
         logger.info(f"✅ Successfully processed all {len(request.questions)} questions")
+        logger.info("=" * 80)
         
         # Validate response
         if len(answers) != len(request.questions):
-            logger.warning(f"Answer count mismatch: {len(answers)} vs {len(request.questions)}")
+            logger.warning(f"⚠️ Answer count mismatch: {len(answers)} vs {len(request.questions)}")
             while len(answers) < len(request.questions):
                 answers.append("Unable to process this question.")
             answers = answers[:len(request.questions)]
@@ -755,9 +840,12 @@ async def process_documents(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"💥 Unexpected error: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+        
 @router.get("/health")
 async def health_check():
     """Health check endpoint"""
