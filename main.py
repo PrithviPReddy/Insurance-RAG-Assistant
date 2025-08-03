@@ -80,7 +80,7 @@ class DocumentChunk(Base):
     document_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(1024))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
+    embedding = Column(Vector(384))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
     created_at = Column(DateTime, default=datetime.utcnow)
 
 @asynccontextmanager
@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI):
         
         # Initialize embedding model
         logger.info("Loading embedding model...")
-        embedding_model = SentenceTransformer('BAAI/bge-large-en-v1.5')
+        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
        
         # Initialize Pinecone client
         logger.info("Initializing Pinecone...")
