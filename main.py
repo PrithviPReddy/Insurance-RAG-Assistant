@@ -109,7 +109,7 @@ class DocumentChunk(Base):
     document_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(384))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
+    embedding = Column(Vector(384))  # all-MiniLM-L6-v2 produces 384-dim vectors
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -135,12 +135,11 @@ async def lifespan(app: FastAPI):
         # Initialize embedding model
         logger.info("Loading embedding model...")
         embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-       
+        
         # Initialize Pinecone client
         logger.info("Initializing Pinecone...")
         pinecone_client = Pinecone(
-            api_key=os.getenv("PINECONE_API_KEY"),
-            environment=os.getenv("PINECONE_ENVIRONMENT")
+            api_key=os.getenv("PINECONE_API_KEY")
         )
         
         # Create or connect to index
@@ -330,7 +329,7 @@ class PDFProcessor:
                     os.unlink(temp_file_path)
                 except:
                     pass
-            
+                
         except Exception as e:
             logger.error(f"Failed to download and extract PDF: {e}")
             raise HTTPException(status_code=400, detail=f"Failed to process PDF: {str(e)}")
@@ -603,18 +602,13 @@ class ImprovedLLMProcessor:
     
     def __init__(self, model_name: str = "gpt-4o-mini"):
         self.model_name = model_name
-        self.system_prompt = '''You are an expert assistant specializing in legal and constitutional documents, particularly the Indian Constitution.
-
+        # The system prompt was adjusted for clarity and to remove conflicting instructions.
+        self.system_prompt = '''You are an expert assistant specializing in legal and constitutional documents.
 INSTRUCTIONS:
-⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
-❌ Do not invent any facts.  
-✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
-! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
-!! Do not mention anything like 'the context does not provide specific information about .....' or wnthing like this, just answer the question directly .
-
-REMEMBER : The context always has the answers to the questions. You just have to find it
-IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
-
+- Keep each answer concise: **only 1 or 2 sentences per question**.
+- Base your answers strictly on the provided context.
+- If the context does not answer the question, state that the information is not available in the provided text.
+- Do not invent any facts or information outside the context.
 Respond in valid JSON format:
 {
   "answers": [
@@ -642,8 +636,6 @@ Respond in valid JSON format:
     def get_targeted_context(self, questions: List[str], all_chunks: List[str]) -> List[str]:
         """Get more targeted context for specific questions"""
         # Simple approach: return the most relevant chunks
-        # In a more sophisticated implementation, you could use embeddings to find
-        # the most relevant chunks for each question
         return all_chunks[:20]  # Return top 20 chunks
 
     def format_context_enhanced(self, chunks: List[str]) -> str:
@@ -676,28 +668,17 @@ Respond in valid JSON format:
             # Prepare better context
             context = self.format_context_enhanced(context_chunks)
             
-            # IMPROVED SYSTEM PROMPT
-            system_prompt = '''You are an expert insurance policy analyst. 
-
-CRITICAL INSTRUCTIONS:
-⚠️ ALWAYS cite specific policy clauses, amounts, percentages, and time limits
-⚠️ Use EXACT terminology from the policy document  
-⚠️ Each answer should be 2-3 sentences with specific details
-❌ Never give generic answers like "may be covered" - be SPECIFIC
-✅ Reference specific exclusions, waiting periods, sub-limits, and conditions
-
-Example good answer: "Pre-hospitalization expenses are covered up to 30 days before admission as per Section 3.2, subject to 10% of sum insured or Rs. 25,000 whichever is lower."
-
-Respond in valid JSON format with specific, detailed answers.'''
-
+            # Use the class-level system prompt
+            system_prompt = self.system_prompt
+            
             # Better user message
-            user_message = f"""INSURANCE POLICY CONTEXT:
+            user_message = f"""CONTEXT:
 {context}
 
-QUESTIONS TO ANSWER WITH SPECIFIC POLICY DETAILS:
+QUESTIONS:
 {self.format_questions(questions)}
 
-For each question, provide specific policy references, amounts, time limits, and conditions."""
+Based *only* on the context provided, answer the questions in the specified JSON format."""
 
             response = openai_client.chat.completions.create(
                 model=self.model_name,
@@ -705,9 +686,10 @@ For each question, provide specific policy references, amounts, time limits, and
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}
                 ],
-                max_tokens=4000,  # INCREASED for detailed answers
-                temperature=0.0,   # REDUCED for more precise answers
-                top_p=0.8
+                max_tokens=4000,
+                temperature=0.0,
+                top_p=0.8,
+                response_format={"type": "json_object"} # Use JSON mode for reliable output
             )
             
             response_text = response.choices[0].message.content.strip()
@@ -717,47 +699,64 @@ For each question, provide specific policy references, amounts, time limits, and
             logger.error(f"LLM processing failed: {e}")
             return [f"Unable to process question due to system error." for _ in questions]
     
-    def format_context(self, chunks: List[str]) -> str:
-        """Format context chunks for better LLM understanding"""
-        formatted_chunks = []
-        
-        for i, chunk in enumerate(chunks):
-            # Clean up chunk
-            clean_chunk = chunk.strip()
-            
-            # Add chunk with numbering for reference
-            formatted_chunks.append(f"[Chunk {i+1}]\n{clean_chunk}")
-        
-        return "\n\n".join(formatted_chunks)
-    
     def parse_response(self, response_text: str, questions: List[str]) -> List[str]:
         """Parse LLM response with improved error handling"""
         try:
-            import json
-            import re
-            
-            # Try to extract JSON
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                json_match = re.search(r'\{.*?"answers"\s*:\s*\[.*?\].*?\}', response_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(0)
-                else:
-                    json_str = response_text
-            
-            parsed_response = json.loads(json_str)
+            # Since we are using JSON mode, the response should be a valid JSON string.
+            parsed_response = json.loads(response_text)
             
             if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
                 answers = parsed_response["answers"]
                 
-                # Ensure we have enough answers
-        while len(answers) < len(questions):
-            answers.append("Unable to process this question due to response parsing issues.")
-        
-        return answers[:len(questions)]
+                # Ensure we have the correct number of answers
+                while len(answers) < len(questions):
+                    answers.append("Unable to process this question due to a response formatting issue.")
+                
+                return answers[:len(questions)]
+            else:
+                raise ValueError("JSON structure is invalid: 'answers' key not found or not a list.")
+                
+        except json.JSONDecodeError as json_error:
+            logger.warning(f"JSON parsing failed: {json_error}")
+            logger.warning(f"Raw response: {response_text[:500]}...")
+            # Fallback parsing if JSON is malformed despite JSON mode
+            return self.fallback_parse(response_text, questions)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during parsing: {e}")
+            return self.fallback_parse(response_text, questions)
 
+    def fallback_parse(self, response_text: str, questions: List[str]) -> List[str]:
+        """Fallback parsing when JSON parsing fails."""
+        lines = response_text.split('\n')
+        answers = []
+        current_answer = ""
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Skip formatting lines
+            if line.startswith(('```', '{', '}', '"answers"', 'CONTEXT', 'QUESTIONS', '[')):
+                continue
+
+            # Check if it's a numbered answer (e.g., "1. Some answer") or a quoted string in a list
+            if re.match(r'^\d+\.', line) or (line.startswith('"') and line.endswith(',')) or (line.startswith('"') and line.endswith('"')):
+                if current_answer:
+                    answers.append(current_answer.strip().strip(',').strip('"'))
+                # Clean up the line
+                current_answer = re.sub(r'^\d+\.\s*', '', line).strip()
+            elif line and not line.startswith(']'): # Append to the current answer if it's a continuation
+                current_answer += " " + line
+        
+        # Add the last parsed answer
+        if current_answer:
+            answers.append(current_answer.strip().strip(',').strip('"'))
+        
+        # Ensure the number of answers matches the number of questions
+        while len(answers) < len(questions):
+            answers.append("Fallback parsing failed to extract a specific answer for this question.")
+        
+        # Return the correct number of answers
+        return answers[:len(questions)]
 
 # Initialize improved processors
 pdf_processor = PDFProcessor()
@@ -780,41 +779,43 @@ async def process_documents(
         logger.info(f"Processing {len(request.questions)} questions")
         url = str(request.documents)
         
-        # Get or process document (same as before)
+        # Get or process document
         cached_document = DatabaseManager.get_document_by_url(db, url)
         if not cached_document:
+            logger.info(f"Document not in cache. Processing URL: {url}")
             text = pdf_processor.download_and_extract_pdf(url)
             chunks = text_chunker.chunk_text(text)
             cached_document = DatabaseManager.save_document(db, url, text, chunks)
-            hybrid_vector_store.add_to_pinecone_fallback(chunks)
-        
-        # IMPROVED: Get MORE targeted chunks per question
+            # No need for Pinecone fallback if pgvector is primary
+        else:
+            logger.info(f"Document found in cache. Using cached data for URL: {url}")
+
+        # IMPROVED: Get targeted chunks for all questions
         all_relevant_chunks = set()
         
-        for question in request.questions[:20]:  # Process first 20 questions more thoroughly
+        for question in request.questions:
+            # Use the enhanced hybrid search for each question
             relevant_chunks = hybrid_vector_store.hybrid_search_enhanced(db, question)
-            all_relevant_chunks.update(relevant_chunks[:3])  # Top 3 per question
-        
-        # For remaining questions, do batch search
-        if len(request.questions) > 20:
-            remaining_questions = request.questions[20:]
-            combined_query = " ".join(remaining_questions[:5])  # Combine queries
-            more_chunks = hybrid_vector_store.hybrid_search_enhanced(db, combined_query)
-            all_relevant_chunks.update(more_chunks[:10])
+            all_relevant_chunks.update(relevant_chunks[:5])  # Take top 5 chunks per question
         
         # INCREASED final context size
-        final_chunks = list(all_relevant_chunks)[:30]  # More context chunks
+        final_chunks = list(all_relevant_chunks)[:30]  # Use up to 30 unique, relevant chunks as context
         
         if not final_chunks:
-            answers = ["Relevant policy information not found in document." for _ in request.questions]
+            logger.warning("No relevant chunks found for any of the questions.")
+            answers = ["Relevant policy information not found in the document." for _ in request.questions]
         else:
+            log_search_results("Combined questions", final_chunks)
             answers = llm_processor.generate_answers(request.questions, final_chunks)
         
         return ProcessResponse(answers=answers)
         
+    except HTTPException as e:
+        # Re-raise HTTP exceptions directly
+        raise e
     except Exception as e:
-        logger.error(f"Processing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+        logger.error(f"An unexpected error occurred during processing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
 
 @router.get("/health")
@@ -867,46 +868,4 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) correct number of answers
-                while len(answers) < len(questions):
-                    answers.append("Unable to find relevant information in the provided context.")
-                
-                return answers[:len(questions)]
-            else:
-                raise ValueError("Invalid JSON structure")
-                
-        except Exception as json_error:
-            logger.warning(f"JSON parsing failed: {json_error}")
-            logger.warning(f"Raw response: {response_text[:500]}...")
-            
-            # Fallback parsing
-            return self.fallback_parse(response_text, questions)
-    
-    def fallback_parse(self, response_text: str, questions: List[str]) -> List[str]:
-        """Fallback parsing when JSON parsing fails"""
-        lines = response_text.split('\n')
-        answers = []
-        current_answer = ""
-        
-        for line in lines:
-            line = line.strip()
-            
-            # Skip headers and formatting
-            if line.startswith(('```', '{', '}', '"answers"', 'CONTEXT', 'QUESTIONS')):
-                continue
-            
-            # Check if it's a numbered answer
-            if re.match(r'^\d+\.', line):
-                if current_answer:
-                    answers.append(current_answer.strip())
-                current_answer = re.sub(r'^\d+\.\s*', '', line)
-            elif line and current_answer:
-                current_answer += " " + line
-            elif line and not current_answer:
-                current_answer = line
-        
-        # Add the last answer
-        if current_answer:
-            answers.append(current_answer.strip())
-        
-        # Ensure
+    uvicorn.run(app, host="0.0.0.0", port=8000)
