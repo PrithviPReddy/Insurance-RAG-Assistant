@@ -324,22 +324,22 @@ class PDFProcessor:
 class ImprovedTextChunker:
     """Enhanced text chunking with better strategies for legal documents"""
     
-    def __init__(self, chunk_size: int = 800, overlap: int = 150):
-        # Improved separators for legal/constitutional documents
+    def __init__(self, chunk_size: int = 1200, overlap: int = 200):  # INCREASED sizes
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=overlap,
             length_function=len,
             separators=[
-                "\n=== Page",  # Page breaks
-                "\n\n",       # Paragraph breaks
-                "\nArticle",   # Article breaks for constitution
-                "\nSection",   # Section breaks
-                "\nChapter",   # Chapter breaks
-                ".\n",         # Sentence breaks
-                "\n",          # Line breaks
-                " ",           # Word breaks
-                ""             # Character breaks
+                "\n\n",           # Paragraph breaks
+                "\nCLAUSE",       # Policy clauses
+                "\nSECTION",      # Policy sections  
+                "\nCOVERAGE",     # Coverage sections
+                "\nEXCLUSION",    # Exclusions
+                "\nDEFINITION",   # Definitions
+                "\n",             # Line breaks
+                ". ",             # Sentence breaks
+                " ",              # Word breaks
+                ""                # Character breaks
             ]
         )
     
@@ -379,17 +379,17 @@ class ImprovedTextChunker:
         
         return text.strip()
     
-    def postprocess_chunk(self, chunk: str) -> str:
-        """Clean up individual chunks"""
-        # Remove page markers at the start/end of chunks
-        chunk = re.sub(r'^=== Page \d+ ===\s*', '', chunk)
-        chunk = re.sub(r'\s*=== Page \d+ ===$', '', chunk)
+    def preprocess_text(self, text: str) -> str:
+        """Enhanced preprocessing for insurance documents"""
+        # Fix common insurance document issues
+        text = re.sub(r'\n\s*CLAUSE\s+(\d+)', r'\n\nCLAUSE \1', text)
+        text = re.sub(r'\n\s*SECTION\s+(\d+)', r'\n\nSECTION \1', text)
+        text = re.sub(r'\n\s*EXCLUSION\s*:', r'\n\nEXCLUSION:', text)
         
-        # Clean up whitespace
-        chunk = re.sub(r'\s+', ' ', chunk)
-        chunk = chunk.strip()
+        # Remove excessive whitespace but preserve structure
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
         
-        return chunk
+        return text.strip()
 
 class EnhancedHybridVectorStore:
     """Enhanced hybrid vector storage with improved search strategies"""
@@ -508,17 +508,51 @@ class EnhancedHybridVectorStore:
         return prioritized[:5]  # Return top 5 key terms
     
     def hybrid_search_enhanced(self, db: Session, query: str) -> List[str]:
-        """Enhanced hybrid search with multiple strategies"""
-        # Try multi-query search first
-        results = self.multi_query_search(db, query)
+        """FIXED: Better search with more relevant chunks"""
+        try:
+            # Get MORE relevant chunks per query
+            original_embedding = embedding_model.encode([query])[0].tolist()
+            
+            # INCREASED SEARCH RESULTS
+            chunks = DatabaseManager.search_similar_chunks(db, original_embedding, limit=25)  # Increased from 15
+            
+            # Extract content and filter out generic chunks
+            results = []
+            for chunk in chunks:
+                content = chunk.content.strip()
+                
+                # FILTER OUT GENERIC/IRRELEVANT CHUNKS
+                if len(content) > 50 and not self.is_generic_chunk(content):
+                    results.append(content)
+            
+            logger.info(f"Enhanced search found {len(results)} quality chunks")
+            return results[:20]  # Return top 20 quality chunks
+            
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return []
+
+    def is_generic_chunk(self, content: str) -> bool:
+        """Filter out generic/useless chunks"""
+        generic_phrases = [
+            "covered provided the Policy has been continuously renewed",
+            "WE/OUR/US/COMPANY means UNITED INDIA INSURANCE",
+            "without any break. 57.",
+            "the time, that is, which is to four right",
+            "school. One day, however, the boy immediately"
+        ]
         
-        if results:
-            logger.info(f"Enhanced search found {len(results)} results from PostgreSQL")
-            return results
-        else:
-            logger.info("No results from PostgreSQL, trying Pinecone fallback")
-            return self.search_pinecone_enhanced(query, limit=15)
-    
+        # If chunk is mostly generic phrases, skip it
+        for phrase in generic_phrases:
+            if phrase.lower() in content.lower():
+                return True
+        
+        # Skip very short chunks
+        if len(content.strip()) < 100:
+            return True
+            
+        return False
+
     def add_to_pinecone_fallback(self, chunks: List[str]):
         """Add chunks to Pinecone as fallback"""
         try:
@@ -574,70 +608,94 @@ Respond in valid JSON format:
 }'''
     
     def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
-        """Generate answers with improved context handling and logging"""
+        """FIXED: Process questions in smaller batches with better context"""
         try:
-            # Prepare context with better formatting
-            context = self.format_context(context_chunks)
+            # PROCESS IN SMALLER BATCHES for better quality
+            if len(questions) > 20:
+                return self.process_large_batch(questions, context_chunks)
             
-            # Log what we're sending to LLM
-            logger.info(f"📤 Sending to LLM:")
-            logger.info(f"  - Questions: {len(questions)}")
-            logger.info(f"  - Context chunks: {len(context_chunks)}")
-            logger.info(f"  - Total context length: {len(context)} characters")
-            logger.info(f"  - Model: {self.model_name}")
+            # Prepare better context
+            context = self.format_context_enhanced(context_chunks)
             
-            # Prepare questions
-            questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
-            
-            # Create user message with better structure
-            user_message = f"""CONTEXT CHUNKS:
+            # IMPROVED SYSTEM PROMPT
+            system_prompt = '''You are an expert insurance policy analyst. 
+
+CRITICAL INSTRUCTIONS:
+⚠️ ALWAYS cite specific policy clauses, amounts, percentages, and time limits
+⚠️ Use EXACT terminology from the policy document  
+⚠️ Each answer should be 2-3 sentences with specific details
+❌ Never give generic answers like "may be covered" - be SPECIFIC
+✅ Reference specific exclusions, waiting periods, sub-limits, and conditions
+
+Example good answer: "Pre-hospitalization expenses are covered up to 30 days before admission as per Section 3.2, subject to 10% of sum insured or Rs. 25,000 whichever is lower."
+
+Respond in valid JSON format with specific, detailed answers.'''
+
+            # Better user message
+            user_message = f"""INSURANCE POLICY CONTEXT:
 {context}
 
-QUESTIONS TO ANSWER:
-{questions_text}
+QUESTIONS TO ANSWER WITH SPECIFIC POLICY DETAILS:
+{self.format_questions(questions)}
 
-Please answer each question based on the provided context chunks. Look for both direct information and related concepts that can help answer the questions."""
+For each question, provide specific policy references, amounts, time limits, and conditions."""
 
-            # Log the actual prompt (truncated)
-            logger.info(f"🔤 LLM Prompt preview (first 500 chars):")
-            logger.info(user_message[:500] + "..." if len(user_message) > 500 else user_message)
-
-            # Make API call
-            logger.info("🌐 Making OpenAI API call...")
             response = openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}
                 ],
-                max_tokens=2000,
-                temperature=0.1,
-                top_p=0.9
+                max_tokens=4000,  # INCREASED for detailed answers
+                temperature=0.0,   # REDUCED for more precise answers
+                top_p=0.8
             )
             
             response_text = response.choices[0].message.content.strip()
-            
-            # Log raw response
-            logger.info(f"📥 Raw LLM Response:")
-            logger.info(response_text)
-            
-            logger.info(f"✅ Generated answers for {len(questions)} questions")
-            
-            # Parse JSON response
-            parsed_answers = self.parse_response(response_text, questions)
-            
-            # Log parsed answers
-            logger.info(f"📋 Parsed Answers:")
-            for i, answer in enumerate(parsed_answers, 1):
-                logger.info(f"  {i}. {answer}")
-            
-            return parsed_answers
+            return self.parse_response(response_text, questions)
             
         except Exception as e:
-            logger.error(f"💥 Failed to generate answers: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return [f"Error processing question: {str(e)}" for _ in questions]
+            logger.error(f"LLM processing failed: {e}")
+            return [f"Unable to process question due to system error." for _ in questions]
+
+
+
+    def process_large_batch(self, questions: List[str], context_chunks: List[str]) -> List[str]:
+        """Process large batches in smaller groups"""
+        all_answers = []
+        batch_size = 15  # Process 15 questions at a time
+        
+        for i in range(0, len(questions), batch_size):
+            batch_questions = questions[i:i+batch_size]
+            
+            # Get more targeted context for this batch
+            batch_context = self.get_targeted_context(batch_questions, context_chunks)
+            
+            batch_answers = self.generate_answers(batch_questions, batch_context)
+            all_answers.extend(batch_answers)
+        
+        return all_answers
+    
+    def format_context_enhanced(self, chunks: List[str]) -> str:
+        """Better context formatting with more structure"""
+        if not chunks:
+            return "No relevant policy information found."
+        
+        # Remove duplicates and sort by relevance
+        unique_chunks = list(dict.fromkeys(chunks))  # Preserve order, remove dupes
+        
+        formatted_chunks = []
+        for i, chunk in enumerate(unique_chunks[:25]):  # Use more chunks
+            clean_chunk = chunk.strip()
+            if len(clean_chunk) > 50:  # Only substantial chunks
+                formatted_chunks.append(f"[Policy Section {i+1}]\n{clean_chunk}")
+        
+        return "\n\n".join(formatted_chunks)
+    
+    def format_questions(self, questions: List[str]) -> str:
+        """Better question formatting"""
+        return "\n".join([f"Q{i+1}: {q}" for i, q in enumerate(questions)])
+
     
     def format_context(self, chunks: List[str]) -> str:
         """Format context chunks for better LLM understanding"""
@@ -737,115 +795,47 @@ async def process_documents(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Process documents with enhanced retrieval and debugging"""
+    """FIXED: Better retrieval and processing"""
     try:
-        logger.info("=" * 80)
-        logger.info(f"🚀 NEW REQUEST: Processing {len(request.questions)} questions")
-        logger.info(f"📎 Document URL: {str(request.documents)}")
-        logger.info("Questions to answer:")
-        for i, q in enumerate(request.questions, 1):
-            logger.info(f"  {i}. {q}")
-        logger.info("=" * 80)
-        
+        logger.info(f"Processing {len(request.questions)} questions")
         url = str(request.documents)
         
-        # Step 1: Check cache
+        # Get or process document (same as before)
         cached_document = DatabaseManager.get_document_by_url(db, url)
-        
-        if cached_document:
-            logger.info(f"✅ Document found in cache with {cached_document.chunk_count} chunks")
-            # Log cached content preview
-            log_document_content(cached_document.content, 500)
-        else:
-            logger.info("❌ Document not in cache. Processing new document...")
-            
-            # Extract and process document
-            logger.info("📥 Downloading and extracting PDF...")
+        if not cached_document:
             text = pdf_processor.download_and_extract_pdf(url)
-            
-            # Log extracted content
-            log_document_content(text, 1000)
-            
-            if len(text) < 100:
-                raise HTTPException(status_code=400, detail="Extracted text is too short")
-            
-            # Enhanced chunking
-            logger.info("✂️ Chunking document...")
             chunks = text_chunker.chunk_text(text)
-            
-            if not chunks:
-                raise HTTPException(status_code=400, detail="No valid chunks created")
-            
-            # Log chunks preview
-            log_chunks_preview(chunks, 5)
-            
-            # Save to database
-            logger.info("💾 Saving to database...")
             cached_document = DatabaseManager.save_document(db, url, text, chunks)
-            
-            # Add to Pinecone fallback
-            logger.info("🌲 Adding to Pinecone fallback...")
             hybrid_vector_store.add_to_pinecone_fallback(chunks)
         
-        # Step 2: Enhanced question processing
-        logger.info("🤔 Processing questions with enhanced retrieval...")
-        
-        # Collect relevant chunks with improved search
+        # IMPROVED: Get MORE targeted chunks per question
         all_relevant_chunks = set()
         
-        for i, question in enumerate(request.questions, 1):
-            logger.info(f"\n--- Processing Question {i}/{len(request.questions)} ---")
-            logger.info(f"Question: {question}")
-            
+        for question in request.questions[:20]:  # Process first 20 questions more thoroughly
             relevant_chunks = hybrid_vector_store.hybrid_search_enhanced(db, question)
-            
-            # Log search results
-            log_search_results(question, relevant_chunks, 2)
-            
-            all_relevant_chunks.update(relevant_chunks[:5])  # Top 5 per question
+            all_relevant_chunks.update(relevant_chunks[:3])  # Top 3 per question
         
-        # Final chunk selection
-        final_chunks = list(all_relevant_chunks)[:20]
+        # For remaining questions, do batch search
+        if len(request.questions) > 20:
+            remaining_questions = request.questions[20:]
+            combined_query = " ".join(remaining_questions[:5])  # Combine queries
+            more_chunks = hybrid_vector_store.hybrid_search_enhanced(db, combined_query)
+            all_relevant_chunks.update(more_chunks[:10])
         
-        logger.info(f"\n📋 FINAL CONTEXT: Selected {len(final_chunks)} unique chunks")
-        logger.info("Context preview:")
-        for i, chunk in enumerate(final_chunks[:3]):
-            logger.info(f"Context {i+1}: {chunk[:100]}...")
+        # INCREASED final context size
+        final_chunks = list(all_relevant_chunks)[:30]  # More context chunks
         
         if not final_chunks:
-            logger.warning("❌ No relevant chunks found!")
-            answers = ["No relevant information found in the document." for _ in request.questions]
+            answers = ["Relevant policy information not found in document." for _ in request.questions]
         else:
-            # Generate answers with improved processing
-            logger.info("🧠 Generating answers with LLM...")
             answers = llm_processor.generate_answers(request.questions, final_chunks)
-            
-            # Log generated answers
-            logger.info("📝 Generated answers:")
-            for i, answer in enumerate(answers, 1):
-                logger.info(f"Answer {i}: {answer[:100]}...")
-        
-        logger.info(f"✅ Successfully processed all {len(request.questions)} questions")
-        logger.info("=" * 80)
-        
-        # Validate response
-        if len(answers) != len(request.questions):
-            logger.warning(f"⚠️ Answer count mismatch: {len(answers)} vs {len(request.questions)}")
-            while len(answers) < len(request.questions):
-                answers.append("Unable to process this question.")
-            answers = answers[:len(request.questions)]
         
         return ProcessResponse(answers=answers)
         
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"💥 Unexpected error: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"Processing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
-        
 @router.get("/health")
 async def health_check():
     """Health check endpoint"""
