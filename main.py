@@ -506,18 +506,52 @@ class EnhancedHybridVectorStore:
                 prioritized.append(term)
         
         return prioritized[:5]  # Return top 5 key terms
+        
+    def is_generic_chunk(self, content: str) -> bool:
+        """Filter out generic/useless chunks"""
+        generic_phrases = [
+            "covered provided the Policy has been continuously renewed",
+            "WE/OUR/US/COMPANY means UNITED INDIA INSURANCE",
+            "without any break. 57.",
+            "the time, that is, which is to four right",
+            "school. One day, however, the boy immediately"
+        ]
+        
+        # If chunk is mostly generic phrases, skip it
+        for phrase in generic_phrases:
+            if phrase.lower() in content.lower():
+                return True
+        
+        # Skip very short chunks
+        if len(content.strip()) < 100:
+            return True
+            
+        return False
     
     def hybrid_search_enhanced(self, db: Session, query: str) -> List[str]:
-        """Enhanced hybrid search with multiple strategies"""
-        # Try multi-query search first
-        results = self.multi_query_search(db, query)
-        
-        if results:
-            logger.info(f"Enhanced search found {len(results)} results from PostgreSQL")
-            return results
-        else:
-            logger.info("No results from PostgreSQL, trying Pinecone fallback")
-            return self.search_pinecone_enhanced(query, limit=15)
+        """FIXED: Better search with more relevant chunks"""
+        try:
+            # Get MORE relevant chunks per query
+            original_embedding = embedding_model.encode([query])[0].tolist()
+            
+            # INCREASED SEARCH RESULTS
+            chunks = DatabaseManager.search_similar_chunks(db, original_embedding, limit=25)  # Increased from 15
+            
+            # Extract content and filter out generic chunks
+            results = []
+            for chunk in chunks:
+                content = chunk.content.strip()
+                
+                # FILTER OUT GENERIC/IRRELEVANT CHUNKS
+                if len(content) > 50 and not self.is_generic_chunk(content):
+                    results.append(content)
+            
+            logger.info(f"Enhanced search found {len(results)} quality chunks")
+            return results[:20]  # Return top 20 quality chunks
+            
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return []
     
     def add_to_pinecone_fallback(self, chunks: List[str]):
         """Add chunks to Pinecone as fallback"""
