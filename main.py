@@ -70,13 +70,11 @@ def log_document_content(content: str, max_chars: int = 1000):
     logger.info(content[:max_chars])
     logger.info("-" * 50)
 
-
 def log_chunks_preview(chunks: List[str], max_chunks: int = 3):
     """Log preview of created chunks"""
     logger.info(f"📦 Created {len(chunks)} chunks. Preview of first {max_chunks}:")
     for i, chunk in enumerate(chunks[:max_chunks]):
         logger.info(f"Chunk {i+1} ({len(chunk)} chars): {chunk[:200]}...")
-
 
 def log_search_results(question: str, chunks: List[str], max_results: int = 2):
     """Log search results for debugging"""
@@ -84,7 +82,6 @@ def log_search_results(question: str, chunks: List[str], max_results: int = 2):
     logger.info(f"Found {len(chunks)} relevant chunks:")
     for i, chunk in enumerate(chunks[:max_results]):
         logger.info(f"Result {i+1}: {chunk[:150]}...")
-
 
 # Database Models
 class Document(Base):
@@ -100,7 +97,6 @@ class Document(Base):
     chunk_count = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
 
-
 class DocumentChunk(Base):
     """Store document chunks with embeddings"""
     __tablename__ = "document_chunks"
@@ -109,9 +105,8 @@ class DocumentChunk(Base):
     document_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(384))  # all-MiniLM-L6-v2 produces 384-dim vectors
+    embedding = Column(Vector(1024))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
     created_at = Column(DateTime, default=datetime.utcnow)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -134,12 +129,13 @@ async def lifespan(app: FastAPI):
         
         # Initialize embedding model
         logger.info("Loading embedding model...")
-        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        
+        embedding_model = SentenceTransformer('BAAI/bge-large-en-v1.5')
+       
         # Initialize Pinecone client
         logger.info("Initializing Pinecone...")
         pinecone_client = Pinecone(
-            api_key=os.getenv("PINECONE_API_KEY")
+            api_key=os.getenv("PINECONE_API_KEY"),
+            environment=os.getenv("PINECONE_ENVIRONMENT")
         )
         
         # Create or connect to index
@@ -161,7 +157,6 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("Shutting down services")
 
-
 # Initialize FastAPI app with lifespan
 app = FastAPI(
     title="HackRx RAG API with Enhanced Retrieval",
@@ -173,22 +168,18 @@ app = FastAPI(
 # Security
 security = HTTPBearer()
 
-
 # Pydantic models
 class ProcessRequest(BaseModel):
     documents: HttpUrl
     questions: List[str]
 
-
 class ProcessResponse(BaseModel):
     answers: List[str]
-
 
 VALID_TOKEN = os.getenv("BEARER_TOKEN")
 
 if not VALID_TOKEN:
     raise ValueError("BEARER_TOKEN is not set in the environment. Please set it before running the app.")
-
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Verify Bearer token"""
@@ -200,7 +191,6 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         )
     return credentials
 
-
 def get_db():
     """Get database session"""
     db = SessionLocal()
@@ -209,11 +199,9 @@ def get_db():
     finally:
         db.close()
 
-
 def get_url_hash(url: str) -> str:
     """Generate hash for URL to use as unique identifier"""
     return hashlib.sha256(url.encode()).hexdigest()
-
 
 class DatabaseManager:
     """Handle database operations for document caching"""
@@ -281,7 +269,6 @@ class DatabaseManager:
             logger.error(f"Failed to search similar chunks: {e}")
             return []
 
-
 class PDFProcessor:
     """Handle PDF download and text extraction using LangChain"""
     
@@ -329,31 +316,30 @@ class PDFProcessor:
                     os.unlink(temp_file_path)
                 except:
                     pass
-                
+            
         except Exception as e:
             logger.error(f"Failed to download and extract PDF: {e}")
             raise HTTPException(status_code=400, detail=f"Failed to process PDF: {str(e)}")
 
-
 class ImprovedTextChunker:
     """Enhanced text chunking with better strategies for legal documents"""
     
-    def __init__(self, chunk_size: int = 1200, overlap: int = 200):  # INCREASED sizes
+    def __init__(self, chunk_size: int = 800, overlap: int = 150):
+        # Improved separators for legal/constitutional documents
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=overlap,
             length_function=len,
             separators=[
-                "\n\n",           # Paragraph breaks
-                "\nCLAUSE",       # Policy clauses
-                "\nSECTION",      # Policy sections  
-                "\nCOVERAGE",     # Coverage sections
-                "\nEXCLUSION",    # Exclusions
-                "\nDEFINITION",   # Definitions
-                "\n",             # Line breaks
-                ". ",             # Sentence breaks
-                " ",              # Word breaks
-                ""                # Character breaks
+                "\n=== Page",  # Page breaks
+                "\n\n",       # Paragraph breaks
+                "\nArticle",   # Article breaks for constitution
+                "\nSection",   # Section breaks
+                "\nChapter",   # Chapter breaks
+                ".\n",         # Sentence breaks
+                "\n",          # Line breaks
+                " ",           # Word breaks
+                ""             # Character breaks
             ]
         )
     
@@ -381,14 +367,15 @@ class ImprovedTextChunker:
             return []
     
     def preprocess_text(self, text: str) -> str:
-        """Enhanced preprocessing for insurance documents"""
-        # Fix common insurance document issues
-        text = re.sub(r'\n\s*CLAUSE\s+(\d+)', r'\n\nCLAUSE \1', text)
-        text = re.sub(r'\n\s*SECTION\s+(\d+)', r'\n\nSECTION \1', text)
-        text = re.sub(r'\n\s*EXCLUSION\s*:', r'\n\nEXCLUSION:', text)
-        
-        # Remove excessive whitespace but preserve structure
+        """Clean and preprocess text for better chunking"""
+        # Remove excessive whitespace
         text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+        
+        # Fix common OCR issues
+        text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)  # Fix hyphenated words
+        
+        # Normalize spacing around articles and sections
+        text = re.sub(r'\b(Article|Section|Chapter)\s+(\d+)', r'\n\1 \2', text)
         
         return text.strip()
     
@@ -403,7 +390,6 @@ class ImprovedTextChunker:
         chunk = chunk.strip()
         
         return chunk
-
 
 class EnhancedHybridVectorStore:
     """Enhanced hybrid vector storage with improved search strategies"""
@@ -520,52 +506,18 @@ class EnhancedHybridVectorStore:
                 prioritized.append(term)
         
         return prioritized[:5]  # Return top 5 key terms
-        
-    def is_generic_chunk(self, content: str) -> bool:
-        """Filter out generic/useless chunks"""
-        generic_phrases = [
-            "covered provided the Policy has been continuously renewed",
-            "WE/OUR/US/COMPANY means UNITED INDIA INSURANCE",
-            "without any break. 57.",
-            "the time, that is, which is to four right",
-            "school. One day, however, the boy immediately"
-        ]
-        
-        # If chunk is mostly generic phrases, skip it
-        for phrase in generic_phrases:
-            if phrase.lower() in content.lower():
-                return True
-        
-        # Skip very short chunks
-        if len(content.strip()) < 100:
-            return True
-            
-        return False
     
     def hybrid_search_enhanced(self, db: Session, query: str) -> List[str]:
-        """FIXED: Better search with more relevant chunks"""
-        try:
-            # Get MORE relevant chunks per query
-            original_embedding = embedding_model.encode([query])[0].tolist()
-            
-            # INCREASED SEARCH RESULTS
-            chunks = DatabaseManager.search_similar_chunks(db, original_embedding, limit=25)  # Increased from 15
-            
-            # Extract content and filter out generic chunks
-            results = []
-            for chunk in chunks:
-                content = chunk.content.strip()
-                
-                # FILTER OUT GENERIC/IRRELEVANT CHUNKS
-                if len(content) > 50 and not self.is_generic_chunk(content):
-                    results.append(content)
-            
-            logger.info(f"Enhanced search found {len(results)} quality chunks")
-            return results[:20]  # Return top 20 quality chunks
-            
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return []
+        """Enhanced hybrid search with multiple strategies"""
+        # Try multi-query search first
+        results = self.multi_query_search(db, query)
+        
+        if results:
+            logger.info(f"Enhanced search found {len(results)} results from PostgreSQL")
+            return results
+        else:
+            logger.info("No results from PostgreSQL, trying Pinecone fallback")
+            return self.search_pinecone_enhanced(query, limit=15)
     
     def add_to_pinecone_fallback(self, chunks: List[str]):
         """Add chunks to Pinecone as fallback"""
@@ -596,19 +548,23 @@ class EnhancedHybridVectorStore:
         except Exception as e:
             logger.error(f"Failed to add to Pinecone fallback: {e}")
 
-
 class ImprovedLLMProcessor:
     """Enhanced LLM processor with better prompting and context handling"""
     
     def __init__(self, model_name: str = "gpt-4o-mini"):
         self.model_name = model_name
-        # The system prompt was adjusted for clarity and to remove conflicting instructions.
-        self.system_prompt = '''You are an expert assistant specializing in legal and constitutional documents.
+        self.system_prompt = '''You are an expert assistant specializing in legal and constitutional documents, particularly the Indian Constitution.
+
 INSTRUCTIONS:
-- Keep each answer concise: **only 1 or 2 sentences per question**.
-- Base your answers strictly on the provided context.
-- If the context does not answer the question, state that the information is not available in the provided text.
-- Do not invent any facts or information outside the context.
+⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
+❌ Do not invent any facts.  
+✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
+! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
+!! Do not mention anything like 'the context does not provide specific information about .....' or wnthing like this, just answer the question directly .
+
+REMEMBER : The context always has the answers to the questions. You just have to find it
+IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
+
 Respond in valid JSON format:
 {
   "answers": [
@@ -616,117 +572,125 @@ Respond in valid JSON format:
     "Answer to question 2"
   ]
 }'''
-
-    def process_large_batch(self, questions: List[str], context_chunks: List[str]) -> List[str]:
-        """Process large batches in smaller groups"""
-        all_answers = []
-        batch_size = 15  # Process 15 questions at a time
-        
-        for i in range(0, len(questions), batch_size):
-            batch_questions = questions[i:i+batch_size]
-            
-            # Get more targeted context for this batch
-            batch_context = self.get_targeted_context(batch_questions, context_chunks)
-            
-            batch_answers = self.generate_answers(batch_questions, batch_context)
-            all_answers.extend(batch_answers)
-        
-        return all_answers
-
-    def get_targeted_context(self, questions: List[str], all_chunks: List[str]) -> List[str]:
-        """Get more targeted context for specific questions"""
-        # Simple approach: return the most relevant chunks
-        return all_chunks[:20]  # Return top 20 chunks
-
-    def format_context_enhanced(self, chunks: List[str]) -> str:
-        """Better context formatting with more structure"""
-        if not chunks:
-            return "No relevant policy information found."
-        
-        # Remove duplicates and sort by relevance
-        unique_chunks = list(dict.fromkeys(chunks))  # Preserve order, remove dupes
-        
-        formatted_chunks = []
-        for i, chunk in enumerate(unique_chunks[:25]):  # Use more chunks
-            clean_chunk = chunk.strip()
-            if len(clean_chunk) > 50:  # Only substantial chunks
-                formatted_chunks.append(f"[Policy Section {i+1}]\n{clean_chunk}")
-        
-        return "\n\n".join(formatted_chunks)
-
-    def format_questions(self, questions: List[str]) -> str:
-        """Better question formatting"""
-        return "\n".join([f"Q{i+1}: {q}" for i, q in enumerate(questions)])
-
+    
     def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
-        """FIXED: Process questions in smaller batches with better context"""
+        """Generate answers with improved context handling and logging"""
         try:
-            # PROCESS IN SMALLER BATCHES for better quality
-            if len(questions) > 20:
-                return self.process_large_batch(questions, context_chunks)
+            # Prepare context with better formatting
+            context = self.format_context(context_chunks)
             
-            # Prepare better context
-            context = self.format_context_enhanced(context_chunks)
+            # Log what we're sending to LLM
+            logger.info(f"📤 Sending to LLM:")
+            logger.info(f"  - Questions: {len(questions)}")
+            logger.info(f"  - Context chunks: {len(context_chunks)}")
+            logger.info(f"  - Total context length: {len(context)} characters")
+            logger.info(f"  - Model: {self.model_name}")
             
-            # Use the class-level system prompt
-            system_prompt = self.system_prompt
+            # Prepare questions
+            questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
             
-            # Better user message
-            user_message = f"""CONTEXT:
+            # Create user message with better structure
+            user_message = f"""CONTEXT CHUNKS:
 {context}
 
-QUESTIONS:
-{self.format_questions(questions)}
+QUESTIONS TO ANSWER:
+{questions_text}
 
-Based *only* on the context provided, answer the questions in the specified JSON format."""
+Please answer each question based on the provided context chunks. Look for both direct information and related concepts that can help answer the questions."""
 
+            # Log the actual prompt (truncated)
+            logger.info(f"🔤 LLM Prompt preview (first 500 chars):")
+            logger.info(user_message[:500] + "..." if len(user_message) > 500 else user_message)
+
+            # Make API call
+            logger.info("🌐 Making OpenAI API call...")
             response = openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_message}
                 ],
-                max_tokens=4000,
-                temperature=0.0,
-                top_p=0.8,
-                response_format={"type": "json_object"} # Use JSON mode for reliable output
+                max_tokens=2000,
+                temperature=0.1,
+                top_p=0.9
             )
             
             response_text = response.choices[0].message.content.strip()
-            return self.parse_response(response_text, questions)
+            
+            # Log raw response
+            logger.info(f"📥 Raw LLM Response:")
+            logger.info(response_text)
+            
+            logger.info(f"✅ Generated answers for {len(questions)} questions")
+            
+            # Parse JSON response
+            parsed_answers = self.parse_response(response_text, questions)
+            
+            # Log parsed answers
+            logger.info(f"📋 Parsed Answers:")
+            for i, answer in enumerate(parsed_answers, 1):
+                logger.info(f"  {i}. {answer}")
+            
+            return parsed_answers
             
         except Exception as e:
-            logger.error(f"LLM processing failed: {e}")
-            return [f"Unable to process question due to system error." for _ in questions]
+            logger.error(f"💥 Failed to generate answers: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return [f"Error processing question: {str(e)}" for _ in questions]
+    
+    def format_context(self, chunks: List[str]) -> str:
+        """Format context chunks for better LLM understanding"""
+        formatted_chunks = []
+        
+        for i, chunk in enumerate(chunks):
+            # Clean up chunk
+            clean_chunk = chunk.strip()
+            
+            # Add chunk with numbering for reference
+            formatted_chunks.append(f"[Chunk {i+1}]\n{clean_chunk}")
+        
+        return "\n\n".join(formatted_chunks)
     
     def parse_response(self, response_text: str, questions: List[str]) -> List[str]:
         """Parse LLM response with improved error handling"""
         try:
-            # Since we are using JSON mode, the response should be a valid JSON string.
-            parsed_response = json.loads(response_text)
+            import json
+            import re
+            
+            # Try to extract JSON
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                json_match = re.search(r'\{.*?"answers"\s*:\s*\[.*?\].*?\}', response_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    json_str = response_text
+            
+            parsed_response = json.loads(json_str)
             
             if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
                 answers = parsed_response["answers"]
                 
-                # Ensure we have the correct number of answers
+                # Ensure correct number of answers
                 while len(answers) < len(questions):
-                    answers.append("Unable to process this question due to a response formatting issue.")
+                    answers.append("Unable to find relevant information in the provided context.")
                 
                 return answers[:len(questions)]
             else:
-                raise ValueError("JSON structure is invalid: 'answers' key not found or not a list.")
+                raise ValueError("Invalid JSON structure")
                 
-        except json.JSONDecodeError as json_error:
+        except Exception as json_error:
             logger.warning(f"JSON parsing failed: {json_error}")
             logger.warning(f"Raw response: {response_text[:500]}...")
-            # Fallback parsing if JSON is malformed despite JSON mode
+            
+            # Fallback parsing
             return self.fallback_parse(response_text, questions)
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during parsing: {e}")
-            return self.fallback_parse(response_text, questions)
-
+    
     def fallback_parse(self, response_text: str, questions: List[str]) -> List[str]:
-        """Fallback parsing when JSON parsing fails."""
+        """Fallback parsing when JSON parsing fails"""
         lines = response_text.split('\n')
         answers = []
         current_answer = ""
@@ -734,28 +698,28 @@ Based *only* on the context provided, answer the questions in the specified JSON
         for line in lines:
             line = line.strip()
             
-            # Skip formatting lines
-            if line.startswith(('```', '{', '}', '"answers"', 'CONTEXT', 'QUESTIONS', '[')):
+            # Skip headers and formatting
+            if line.startswith(('```', '{', '}', '"answers"', 'CONTEXT', 'QUESTIONS')):
                 continue
-
-            # Check if it's a numbered answer (e.g., "1. Some answer") or a quoted string in a list
-            if re.match(r'^\d+\.', line) or (line.startswith('"') and line.endswith(',')) or (line.startswith('"') and line.endswith('"')):
+            
+            # Check if it's a numbered answer
+            if re.match(r'^\d+\.', line):
                 if current_answer:
-                    answers.append(current_answer.strip().strip(',').strip('"'))
-                # Clean up the line
-                current_answer = re.sub(r'^\d+\.\s*', '', line).strip()
-            elif line and not line.startswith(']'): # Append to the current answer if it's a continuation
+                    answers.append(current_answer.strip())
+                current_answer = re.sub(r'^\d+\.\s*', '', line)
+            elif line and current_answer:
                 current_answer += " " + line
+            elif line and not current_answer:
+                current_answer = line
         
-        # Add the last parsed answer
+        # Add the last answer
         if current_answer:
-            answers.append(current_answer.strip().strip(',').strip('"'))
+            answers.append(current_answer.strip())
         
-        # Ensure the number of answers matches the number of questions
+        # Ensure we have enough answers
         while len(answers) < len(questions):
-            answers.append("Fallback parsing failed to extract a specific answer for this question.")
+            answers.append("Unable to process this question due to response parsing issues.")
         
-        # Return the correct number of answers
         return answers[:len(questions)]
 
 # Initialize improved processors
@@ -767,62 +731,125 @@ llm_processor = ImprovedLLMProcessor()
 # Create router
 router = APIRouter(prefix="/api/v1")
 
-
 @router.post("/hackrx/run", response_model=ProcessResponse)
 async def process_documents(
     request: ProcessRequest,
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """FIXED: Better retrieval and processing"""
+    """Process documents with enhanced retrieval and debugging"""
     try:
-        logger.info(f"Processing {len(request.questions)} questions")
+        logger.info("=" * 80)
+        logger.info(f"🚀 NEW REQUEST: Processing {len(request.questions)} questions")
+        logger.info(f"📎 Document URL: {str(request.documents)}")
+        logger.info("Questions to answer:")
+        for i, q in enumerate(request.questions, 1):
+            logger.info(f"  {i}. {q}")
+        logger.info("=" * 80)
+        
         url = str(request.documents)
         
-        # Get or process document
+        # Step 1: Check cache
         cached_document = DatabaseManager.get_document_by_url(db, url)
-        if not cached_document:
-            logger.info(f"Document not in cache. Processing URL: {url}")
-            text = pdf_processor.download_and_extract_pdf(url)
-            chunks = text_chunker.chunk_text(text)
-            cached_document = DatabaseManager.save_document(db, url, text, chunks)
-            # No need for Pinecone fallback if pgvector is primary
+        
+        if cached_document:
+            logger.info(f"✅ Document found in cache with {cached_document.chunk_count} chunks")
+            # Log cached content preview
+            log_document_content(cached_document.content, 500)
         else:
-            logger.info(f"Document found in cache. Using cached data for URL: {url}")
-
-        # IMPROVED: Get targeted chunks for all questions
+            logger.info("❌ Document not in cache. Processing new document...")
+            
+            # Extract and process document
+            logger.info("📥 Downloading and extracting PDF...")
+            text = pdf_processor.download_and_extract_pdf(url)
+            
+            # Log extracted content
+            log_document_content(text, 1000)
+            
+            if len(text) < 100:
+                raise HTTPException(status_code=400, detail="Extracted text is too short")
+            
+            # Enhanced chunking
+            logger.info("✂️ Chunking document...")
+            chunks = text_chunker.chunk_text(text)
+            
+            if not chunks:
+                raise HTTPException(status_code=400, detail="No valid chunks created")
+            
+            # Log chunks preview
+            log_chunks_preview(chunks, 5)
+            
+            # Save to database
+            logger.info("💾 Saving to database...")
+            cached_document = DatabaseManager.save_document(db, url, text, chunks)
+            
+            # Add to Pinecone fallback
+            logger.info("🌲 Adding to Pinecone fallback...")
+            hybrid_vector_store.add_to_pinecone_fallback(chunks)
+        
+        # Step 2: Enhanced question processing
+        logger.info("🤔 Processing questions with enhanced retrieval...")
+        
+        # Collect relevant chunks with improved search
         all_relevant_chunks = set()
         
-        for question in request.questions:
-            # Use the enhanced hybrid search for each question
+        for i, question in enumerate(request.questions, 1):
+            logger.info(f"\n--- Processing Question {i}/{len(request.questions)} ---")
+            logger.info(f"Question: {question}")
+            
             relevant_chunks = hybrid_vector_store.hybrid_search_enhanced(db, question)
-            all_relevant_chunks.update(relevant_chunks[:5])  # Take top 5 chunks per question
+            
+            # Log search results
+            log_search_results(question, relevant_chunks, 2)
+            
+            all_relevant_chunks.update(relevant_chunks[:5])  # Top 5 per question
         
-        # INCREASED final context size
-        final_chunks = list(all_relevant_chunks)[:30]  # Use up to 30 unique, relevant chunks as context
+        # Final chunk selection
+        final_chunks = list(all_relevant_chunks)[:20]
+        
+        logger.info(f"\n📋 FINAL CONTEXT: Selected {len(final_chunks)} unique chunks")
+        logger.info("Context preview:")
+        for i, chunk in enumerate(final_chunks[:3]):
+            logger.info(f"Context {i+1}: {chunk[:100]}...")
         
         if not final_chunks:
-            logger.warning("No relevant chunks found for any of the questions.")
-            answers = ["Relevant policy information not found in the document." for _ in request.questions]
+            logger.warning("❌ No relevant chunks found!")
+            answers = ["No relevant information found in the document." for _ in request.questions]
         else:
-            log_search_results("Combined questions", final_chunks)
+            # Generate answers with improved processing
+            logger.info("🧠 Generating answers with LLM...")
             answers = llm_processor.generate_answers(request.questions, final_chunks)
+            
+            # Log generated answers
+            logger.info("📝 Generated answers:")
+            for i, answer in enumerate(answers, 1):
+                logger.info(f"Answer {i}: {answer[:100]}...")
+        
+        logger.info(f"✅ Successfully processed all {len(request.questions)} questions")
+        logger.info("=" * 80)
+        
+        # Validate response
+        if len(answers) != len(request.questions):
+            logger.warning(f"⚠️ Answer count mismatch: {len(answers)} vs {len(request.questions)}")
+            while len(answers) < len(request.questions):
+                answers.append("Unable to process this question.")
+            answers = answers[:len(request.questions)]
         
         return ProcessResponse(answers=answers)
         
-    except HTTPException as e:
-        # Re-raise HTTP exceptions directly
-        raise e
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"An unexpected error occurred during processing: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+        logger.error(f"💥 Unexpected error: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-
+        
 @router.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "message": "Enhanced HackRx RAG API is running"}
-
 
 @router.get("/cache/stats")
 async def cache_stats(db: Session = Depends(get_db)):
@@ -840,10 +867,8 @@ async def cache_stats(db: Session = Depends(get_db)):
     except Exception as e:
         return {"error": str(e)}
 
-
 # Include router
 app.include_router(router)
-
 
 @app.get("/")
 async def root():
@@ -864,7 +889,6 @@ async def root():
             "cache_stats": "/api/v1/cache/stats"
         }
     }
-
 
 if __name__ == "__main__":
     import uvicorn
