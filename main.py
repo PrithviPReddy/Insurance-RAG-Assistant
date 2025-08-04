@@ -324,22 +324,22 @@ class PDFProcessor:
 class ImprovedTextChunker:
     """Enhanced text chunking with better strategies for legal documents"""
     
-    def __init__(self, chunk_size: int = 800, overlap: int = 150):
-        # Improved separators for legal/constitutional documents
+    def __init__(self, chunk_size: int = 1200, overlap: int = 200):  # INCREASED sizes
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=overlap,
             length_function=len,
             separators=[
-                "\n=== Page",  # Page breaks
-                "\n\n",       # Paragraph breaks
-                "\nArticle",   # Article breaks for constitution
-                "\nSection",   # Section breaks
-                "\nChapter",   # Chapter breaks
-                ".\n",         # Sentence breaks
-                "\n",          # Line breaks
-                " ",           # Word breaks
-                ""             # Character breaks
+                "\n\n",           # Paragraph breaks
+                "\nCLAUSE",       # Policy clauses
+                "\nSECTION",      # Policy sections  
+                "\nCOVERAGE",     # Coverage sections
+                "\nEXCLUSION",    # Exclusions
+                "\nDEFINITION",   # Definitions
+                "\n",             # Line breaks
+                ". ",             # Sentence breaks
+                " ",              # Word breaks
+                ""                # Character breaks
             ]
         )
     
@@ -367,15 +367,14 @@ class ImprovedTextChunker:
             return []
     
     def preprocess_text(self, text: str) -> str:
-        """Clean and preprocess text for better chunking"""
-        # Remove excessive whitespace
+        """Enhanced preprocessing for insurance documents"""
+        # Fix common insurance document issues
+        text = re.sub(r'\n\s*CLAUSE\s+(\d+)', r'\n\nCLAUSE \1', text)
+        text = re.sub(r'\n\s*SECTION\s+(\d+)', r'\n\nSECTION \1', text)
+        text = re.sub(r'\n\s*EXCLUSION\s*:', r'\n\nEXCLUSION:', text)
+        
+        # Remove excessive whitespace but preserve structure
         text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
-        
-        # Fix common OCR issues
-        text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)  # Fix hyphenated words
-        
-        # Normalize spacing around articles and sections
-        text = re.sub(r'\b(Article|Section|Chapter)\s+(\d+)', r'\n\1 \2', text)
         
         return text.strip()
     
@@ -796,113 +795,47 @@ async def process_documents(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Process documents with enhanced retrieval and debugging"""
+    """FIXED: Better retrieval and processing"""
     try:
-        logger.info("=" * 80)
-        logger.info(f"🚀 NEW REQUEST: Processing {len(request.questions)} questions")
-        logger.info(f"📎 Document URL: {str(request.documents)}")
-        logger.info("Questions to answer:")
-        for i, q in enumerate(request.questions, 1):
-            logger.info(f"  {i}. {q}")
-        logger.info("=" * 80)
-        
+        logger.info(f"Processing {len(request.questions)} questions")
         url = str(request.documents)
         
-        # Step 1: Check cache
+        # Get or process document (same as before)
         cached_document = DatabaseManager.get_document_by_url(db, url)
-        
-        if cached_document:
-            logger.info(f"✅ Document found in cache with {cached_document.chunk_count} chunks")
-            # Log cached content preview
-            log_document_content(cached_document.content, 500)
-        else:
-            logger.info("❌ Document not in cache. Processing new document...")
-            
-            # Extract and process document
-            logger.info("📥 Downloading and extracting PDF...")
+        if not cached_document:
             text = pdf_processor.download_and_extract_pdf(url)
-            
-            # Log extracted content
-            log_document_content(text, 1000)
-            
-            if len(text) < 100:
-                raise HTTPException(status_code=400, detail="Extracted text is too short")
-            
-            # Enhanced chunking
-            logger.info("✂️ Chunking document...")
             chunks = text_chunker.chunk_text(text)
-            
-            if not chunks:
-                raise HTTPException(status_code=400, detail="No valid chunks created")
-            
-            # Log chunks preview
-            log_chunks_preview(chunks, 5)
-            
-            # Save to database
-            logger.info("💾 Saving to database...")
             cached_document = DatabaseManager.save_document(db, url, text, chunks)
-            
-            # Add to Pinecone fallback
-            logger.info("🌲 Adding to Pinecone fallback...")
             hybrid_vector_store.add_to_pinecone_fallback(chunks)
         
-        # Step 2: Enhanced question processing
-        logger.info("🤔 Processing questions with enhanced retrieval...")
-        
-        # Collect relevant chunks with improved search
+        # IMPROVED: Get MORE targeted chunks per question
         all_relevant_chunks = set()
         
-        for i, question in enumerate(request.questions, 1):
-            logger.info(f"\n--- Processing Question {i}/{len(request.questions)} ---")
-            logger.info(f"Question: {question}")
-            
+        for question in request.questions[:20]:  # Process first 20 questions more thoroughly
             relevant_chunks = hybrid_vector_store.hybrid_search_enhanced(db, question)
-            
-            # Log search results
-            log_search_results(question, relevant_chunks, 2)
-            
-            all_relevant_chunks.update(relevant_chunks[:5])  # Top 5 per question
+            all_relevant_chunks.update(relevant_chunks[:3])  # Top 3 per question
         
-        # Final chunk selection
-        final_chunks = list(all_relevant_chunks)[:20]
+        # For remaining questions, do batch search
+        if len(request.questions) > 20:
+            remaining_questions = request.questions[20:]
+            combined_query = " ".join(remaining_questions[:5])  # Combine queries
+            more_chunks = hybrid_vector_store.hybrid_search_enhanced(db, combined_query)
+            all_relevant_chunks.update(more_chunks[:10])
         
-        logger.info(f"\n📋 FINAL CONTEXT: Selected {len(final_chunks)} unique chunks")
-        logger.info("Context preview:")
-        for i, chunk in enumerate(final_chunks[:3]):
-            logger.info(f"Context {i+1}: {chunk[:100]}...")
+        # INCREASED final context size
+        final_chunks = list(all_relevant_chunks)[:30]  # More context chunks
         
         if not final_chunks:
-            logger.warning("❌ No relevant chunks found!")
-            answers = ["No relevant information found in the document." for _ in request.questions]
+            answers = ["Relevant policy information not found in document." for _ in request.questions]
         else:
-            # Generate answers with improved processing
-            logger.info("🧠 Generating answers with LLM...")
             answers = llm_processor.generate_answers(request.questions, final_chunks)
-            
-            # Log generated answers
-            logger.info("📝 Generated answers:")
-            for i, answer in enumerate(answers, 1):
-                logger.info(f"Answer {i}: {answer[:100]}...")
-        
-        logger.info(f"✅ Successfully processed all {len(request.questions)} questions")
-        logger.info("=" * 80)
-        
-        # Validate response
-        if len(answers) != len(request.questions):
-            logger.warning(f"⚠️ Answer count mismatch: {len(answers)} vs {len(request.questions)}")
-            while len(answers) < len(request.questions):
-                answers.append("Unable to process this question.")
-            answers = answers[:len(request.questions)]
         
         return ProcessResponse(answers=answers)
         
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"💥 Unexpected error: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"Processing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
 
         
 @router.get("/health")
