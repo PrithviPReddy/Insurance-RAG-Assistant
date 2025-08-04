@@ -752,7 +752,7 @@ For each question, provide specific policy references, amounts, time limits, and
         if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
             answers = parsed_response["answers"]
 
-            # ✅ FIXED INDENTATION: This should be inside the if block
+            # Pad missing answers
             while len(answers) < len(questions):
                 answers.append("Unable to find relevant information in the provided context.")
 
@@ -766,6 +766,8 @@ For each question, provide specific policy references, amounts, time limits, and
 
         # Fallback parsing
         return self.fallback_parse(response_text, questions)
+
+
 
 
 
