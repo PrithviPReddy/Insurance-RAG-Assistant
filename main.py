@@ -70,11 +70,13 @@ def log_document_content(content: str, max_chars: int = 1000):
     logger.info(content[:max_chars])
     logger.info("-" * 50)
 
+
 def log_chunks_preview(chunks: List[str], max_chunks: int = 3):
     """Log preview of created chunks"""
     logger.info(f"📦 Created {len(chunks)} chunks. Preview of first {max_chunks}:")
     for i, chunk in enumerate(chunks[:max_chunks]):
         logger.info(f"Chunk {i+1} ({len(chunk)} chars): {chunk[:200]}...")
+
 
 def log_search_results(question: str, chunks: List[str], max_results: int = 2):
     """Log search results for debugging"""
@@ -82,6 +84,7 @@ def log_search_results(question: str, chunks: List[str], max_results: int = 2):
     logger.info(f"Found {len(chunks)} relevant chunks:")
     for i, chunk in enumerate(chunks[:max_results]):
         logger.info(f"Result {i+1}: {chunk[:150]}...")
+
 
 # Database Models
 class Document(Base):
@@ -97,6 +100,7 @@ class Document(Base):
     chunk_count = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
 
+
 class DocumentChunk(Base):
     """Store document chunks with embeddings"""
     __tablename__ = "document_chunks"
@@ -107,6 +111,7 @@ class DocumentChunk(Base):
     content = Column(Text, nullable=False)
     embedding = Column(Vector(384))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
     created_at = Column(DateTime, default=datetime.utcnow)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -157,6 +162,7 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("Shutting down services")
 
+
 # Initialize FastAPI app with lifespan
 app = FastAPI(
     title="HackRx RAG API with Enhanced Retrieval",
@@ -168,18 +174,22 @@ app = FastAPI(
 # Security
 security = HTTPBearer()
 
+
 # Pydantic models
 class ProcessRequest(BaseModel):
     documents: HttpUrl
     questions: List[str]
 
+
 class ProcessResponse(BaseModel):
     answers: List[str]
+
 
 VALID_TOKEN = os.getenv("BEARER_TOKEN")
 
 if not VALID_TOKEN:
     raise ValueError("BEARER_TOKEN is not set in the environment. Please set it before running the app.")
+
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Verify Bearer token"""
@@ -191,6 +201,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         )
     return credentials
 
+
 def get_db():
     """Get database session"""
     db = SessionLocal()
@@ -199,9 +210,11 @@ def get_db():
     finally:
         db.close()
 
+
 def get_url_hash(url: str) -> str:
     """Generate hash for URL to use as unique identifier"""
     return hashlib.sha256(url.encode()).hexdigest()
+
 
 class DatabaseManager:
     """Handle database operations for document caching"""
@@ -269,6 +282,7 @@ class DatabaseManager:
             logger.error(f"Failed to search similar chunks: {e}")
             return []
 
+
 class PDFProcessor:
     """Handle PDF download and text extraction using LangChain"""
     
@@ -320,6 +334,7 @@ class PDFProcessor:
         except Exception as e:
             logger.error(f"Failed to download and extract PDF: {e}")
             raise HTTPException(status_code=400, detail=f"Failed to process PDF: {str(e)}")
+
 
 class ImprovedTextChunker:
     """Enhanced text chunking with better strategies for legal documents"""
@@ -389,6 +404,7 @@ class ImprovedTextChunker:
         chunk = chunk.strip()
         
         return chunk
+
 
 class EnhancedHybridVectorStore:
     """Enhanced hybrid vector storage with improved search strategies"""
@@ -581,6 +597,7 @@ class EnhancedHybridVectorStore:
         except Exception as e:
             logger.error(f"Failed to add to Pinecone fallback: {e}")
 
+
 class ImprovedLLMProcessor:
     """Enhanced LLM processor with better prompting and context handling"""
     
@@ -606,7 +623,6 @@ Respond in valid JSON format:
   ]
 }'''
 
-
     def process_large_batch(self, questions: List[str], context_chunks: List[str]) -> List[str]:
         """Process large batches in smaller groups"""
         all_answers = []
@@ -623,7 +639,12 @@ Respond in valid JSON format:
         
         return all_answers
 
-
+    def get_targeted_context(self, questions: List[str], all_chunks: List[str]) -> List[str]:
+        """Get more targeted context for specific questions"""
+        # Simple approach: return the most relevant chunks
+        # In a more sophisticated implementation, you could use embeddings to find
+        # the most relevant chunks for each question
+        return all_chunks[:20]  # Return top 20 chunks
 
     def format_context_enhanced(self, chunks: List[str]) -> str:
         """Better context formatting with more structure"""
@@ -645,8 +666,7 @@ Respond in valid JSON format:
         """Better question formatting"""
         return "\n".join([f"Q{i+1}: {q}" for i, q in enumerate(questions)])
 
-
-   def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
+    def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
         """FIXED: Process questions in smaller batches with better context"""
         try:
             # PROCESS IN SMALLER BATCHES for better quality
@@ -732,53 +752,12 @@ For each question, provide specific policy references, amounts, time limits, and
             if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
                 answers = parsed_response["answers"]
                 
-                # Ensure correct number of answers
-                while len(answers) < len(questions):
-                    answers.append("Unable to find relevant information in the provided context.")
-                
-                return answers[:len(questions)]
-            else:
-                raise ValueError("Invalid JSON structure")
-                
-        except Exception as json_error:
-            logger.warning(f"JSON parsing failed: {json_error}")
-            logger.warning(f"Raw response: {response_text[:500]}...")
-            
-            # Fallback parsing
-            return self.fallback_parse(response_text, questions)
-    
-    def fallback_parse(self, response_text: str, questions: List[str]) -> List[str]:
-        """Fallback parsing when JSON parsing fails"""
-        lines = response_text.split('\n')
-        answers = []
-        current_answer = ""
-        
-        for line in lines:
-            line = line.strip()
-            
-            # Skip headers and formatting
-            if line.startswith(('```', '{', '}', '"answers"', 'CONTEXT', 'QUESTIONS')):
-                continue
-            
-            # Check if it's a numbered answer
-            if re.match(r'^\d+\.', line):
-                if current_answer:
-                    answers.append(current_answer.strip())
-                current_answer = re.sub(r'^\d+\.\s*', '', line)
-            elif line and current_answer:
-                current_answer += " " + line
-            elif line and not current_answer:
-                current_answer = line
-        
-        # Add the last answer
-        if current_answer:
-            answers.append(current_answer.strip())
-        
-        # Ensure we have enough answers
+                # Ensure we have enough answers
         while len(answers) < len(questions):
             answers.append("Unable to process this question due to response parsing issues.")
         
         return answers[:len(questions)]
+
 
 # Initialize improved processors
 pdf_processor = PDFProcessor()
@@ -788,6 +767,7 @@ llm_processor = ImprovedLLMProcessor()
 
 # Create router
 router = APIRouter(prefix="/api/v1")
+
 
 @router.post("/hackrx/run", response_model=ProcessResponse)
 async def process_documents(
@@ -837,11 +817,11 @@ async def process_documents(
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
-        
 @router.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "message": "Enhanced HackRx RAG API is running"}
+
 
 @router.get("/cache/stats")
 async def cache_stats(db: Session = Depends(get_db)):
@@ -859,8 +839,10 @@ async def cache_stats(db: Session = Depends(get_db)):
     except Exception as e:
         return {"error": str(e)}
 
+
 # Include router
 app.include_router(router)
+
 
 @app.get("/")
 async def root():
@@ -882,6 +864,49 @@ async def root():
         }
     }
 
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000) correct number of answers
+                while len(answers) < len(questions):
+                    answers.append("Unable to find relevant information in the provided context.")
+                
+                return answers[:len(questions)]
+            else:
+                raise ValueError("Invalid JSON structure")
+                
+        except Exception as json_error:
+            logger.warning(f"JSON parsing failed: {json_error}")
+            logger.warning(f"Raw response: {response_text[:500]}...")
+            
+            # Fallback parsing
+            return self.fallback_parse(response_text, questions)
+    
+    def fallback_parse(self, response_text: str, questions: List[str]) -> List[str]:
+        """Fallback parsing when JSON parsing fails"""
+        lines = response_text.split('\n')
+        answers = []
+        current_answer = ""
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Skip headers and formatting
+            if line.startswith(('```', '{', '}', '"answers"', 'CONTEXT', 'QUESTIONS')):
+                continue
+            
+            # Check if it's a numbered answer
+            if re.match(r'^\d+\.', line):
+                if current_answer:
+                    answers.append(current_answer.strip())
+                current_answer = re.sub(r'^\d+\.\s*', '', line)
+            elif line and current_answer:
+                current_answer += " " + line
+            elif line and not current_answer:
+                current_answer = line
+        
+        # Add the last answer
+        if current_answer:
+            answers.append(current_answer.strip())
+        
+        # Ensure
