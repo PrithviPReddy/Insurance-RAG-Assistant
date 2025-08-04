@@ -606,72 +606,97 @@ Respond in valid JSON format:
     "Answer to question 2"
   ]
 }'''
-    
-    def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
-        """Generate answers with improved context handling and logging"""
+
+
+    def process_large_batch(self, questions: List[str], context_chunks: List[str]) -> List[str]:
+        """Process large batches in smaller groups"""
+        all_answers = []
+        batch_size = 15  # Process 15 questions at a time
+        
+        for i in range(0, len(questions), batch_size):
+            batch_questions = questions[i:i+batch_size]
+            
+            # Get more targeted context for this batch
+            batch_context = self.get_targeted_context(batch_questions, context_chunks)
+            
+            batch_answers = self.generate_answers(batch_questions, batch_context)
+            all_answers.extend(batch_answers)
+        
+        return all_answers
+
+
+
+    def format_context_enhanced(self, chunks: List[str]) -> str:
+        """Better context formatting with more structure"""
+        if not chunks:
+            return "No relevant policy information found."
+        
+        # Remove duplicates and sort by relevance
+        unique_chunks = list(dict.fromkeys(chunks))  # Preserve order, remove dupes
+        
+        formatted_chunks = []
+        for i, chunk in enumerate(unique_chunks[:25]):  # Use more chunks
+            clean_chunk = chunk.strip()
+            if len(clean_chunk) > 50:  # Only substantial chunks
+                formatted_chunks.append(f"[Policy Section {i+1}]\n{clean_chunk}")
+        
+        return "\n\n".join(formatted_chunks)
+
+    def format_questions(self, questions: List[str]) -> str:
+        """Better question formatting"""
+        return "\n".join([f"Q{i+1}: {q}" for i, q in enumerate(questions)])
+
+
+   def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
+        """FIXED: Process questions in smaller batches with better context"""
         try:
-            # Prepare context with better formatting
-            context = self.format_context(context_chunks)
+            # PROCESS IN SMALLER BATCHES for better quality
+            if len(questions) > 20:
+                return self.process_large_batch(questions, context_chunks)
             
-            # Log what we're sending to LLM
-            logger.info(f"📤 Sending to LLM:")
-            logger.info(f"  - Questions: {len(questions)}")
-            logger.info(f"  - Context chunks: {len(context_chunks)}")
-            logger.info(f"  - Total context length: {len(context)} characters")
-            logger.info(f"  - Model: {self.model_name}")
+            # Prepare better context
+            context = self.format_context_enhanced(context_chunks)
             
-            # Prepare questions
-            questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
-            
-            # Create user message with better structure
-            user_message = f"""CONTEXT CHUNKS:
+            # IMPROVED SYSTEM PROMPT
+            system_prompt = '''You are an expert insurance policy analyst. 
+
+CRITICAL INSTRUCTIONS:
+⚠️ ALWAYS cite specific policy clauses, amounts, percentages, and time limits
+⚠️ Use EXACT terminology from the policy document  
+⚠️ Each answer should be 2-3 sentences with specific details
+❌ Never give generic answers like "may be covered" - be SPECIFIC
+✅ Reference specific exclusions, waiting periods, sub-limits, and conditions
+
+Example good answer: "Pre-hospitalization expenses are covered up to 30 days before admission as per Section 3.2, subject to 10% of sum insured or Rs. 25,000 whichever is lower."
+
+Respond in valid JSON format with specific, detailed answers.'''
+
+            # Better user message
+            user_message = f"""INSURANCE POLICY CONTEXT:
 {context}
 
-QUESTIONS TO ANSWER:
-{questions_text}
+QUESTIONS TO ANSWER WITH SPECIFIC POLICY DETAILS:
+{self.format_questions(questions)}
 
-Please answer each question based on the provided context chunks. Look for both direct information and related concepts that can help answer the questions."""
+For each question, provide specific policy references, amounts, time limits, and conditions."""
 
-            # Log the actual prompt (truncated)
-            logger.info(f"🔤 LLM Prompt preview (first 500 chars):")
-            logger.info(user_message[:500] + "..." if len(user_message) > 500 else user_message)
-
-            # Make API call
-            logger.info("🌐 Making OpenAI API call...")
             response = openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}
                 ],
-                max_tokens=2000,
-                temperature=0.1,
-                top_p=0.9
+                max_tokens=4000,  # INCREASED for detailed answers
+                temperature=0.0,   # REDUCED for more precise answers
+                top_p=0.8
             )
             
             response_text = response.choices[0].message.content.strip()
-            
-            # Log raw response
-            logger.info(f"📥 Raw LLM Response:")
-            logger.info(response_text)
-            
-            logger.info(f"✅ Generated answers for {len(questions)} questions")
-            
-            # Parse JSON response
-            parsed_answers = self.parse_response(response_text, questions)
-            
-            # Log parsed answers
-            logger.info(f"📋 Parsed Answers:")
-            for i, answer in enumerate(parsed_answers, 1):
-                logger.info(f"  {i}. {answer}")
-            
-            return parsed_answers
+            return self.parse_response(response_text, questions)
             
         except Exception as e:
-            logger.error(f"💥 Failed to generate answers: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return [f"Error processing question: {str(e)}" for _ in questions]
+            logger.error(f"LLM processing failed: {e}")
+            return [f"Unable to process question due to system error." for _ in questions]
     
     def format_context(self, chunks: List[str]) -> str:
         """Format context chunks for better LLM understanding"""
