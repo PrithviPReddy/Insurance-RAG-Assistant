@@ -731,45 +731,32 @@ For each question, provide specific policy references, amounts, time limits, and
         return "\n\n".join(formatted_chunks)
     
     def parse_response(self, response_text: str, questions: List[str]) -> List[str]:
-    """Parse LLM response with improved error handling"""
-    try:
-        import json
-        import re
-
-        # Try to extract JSON
-        json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            json_match = re.search(r'\{.*?"answers"\s*:\s*\[.*?\].*?\}', response_text, re.DOTALL)
+        """Parse LLM response with improved error handling"""
+        try:
+            import json
+            import re
+            
+            # Try to extract JSON
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
             if json_match:
-                json_str = json_match.group(0)
+                json_str = json_match.group(1)
             else:
-                json_str = response_text
-
-        parsed_response = json.loads(json_str)
-
-        if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
-            answers = parsed_response["answers"]
-
-            # Pad missing answers
-            while len(answers) < len(questions):
-                answers.append("Unable to find relevant information in the provided context.")
-
-            return answers[:len(questions)]
-        else:
-            raise ValueError("Invalid JSON structure")
-
-    except Exception as json_error:
-        logger.warning(f"JSON parsing failed: {json_error}")
-        logger.warning(f"Raw response: {response_text[:500]}...")
-
-        # Fallback parsing
-        return self.fallback_parse(response_text, questions)
-
-
-
-
+                json_match = re.search(r'\{.*?"answers"\s*:\s*\[.*?\].*?\}', response_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    json_str = response_text
+            
+            parsed_response = json.loads(json_str)
+            
+            if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
+                answers = parsed_response["answers"]
+                
+                # Ensure we have enough answers
+        while len(answers) < len(questions):
+            answers.append("Unable to process this question due to response parsing issues.")
+        
+        return answers[:len(questions)]
 
 
 # Initialize improved processors
