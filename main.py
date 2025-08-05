@@ -113,7 +113,7 @@ class DocumentChunk(Base):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown"""
-    global embedding_model, pinecone_client, pinecone_index, openai_client, db_engine, SessionLocal
+    global embedding_model, pinecone_client, pinecone_index, genai_client, db_engine, SessionLocal
     
     try:
         # Initialize database
@@ -662,7 +662,7 @@ Please answer each question based on the provided context chunks. Look for both 
 
             # Make API call
             logger.info("🌐 Making OpenAI API call...")
-            response = openai_client.chat.completions.create(
+            response = genai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": self.system_prompt},
