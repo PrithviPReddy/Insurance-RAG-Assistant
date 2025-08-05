@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
         # Initialize Google Gemini client
         logger.info("Initializing Google Gemini 2.5 Flash...")
         genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        genai_client = genai.GenerativeModel('gemini-2.0-flash')
+        genai_client = genai.GenerativeModel('gemini-2.5-flash')
         
         logger.info("All services initialized successfully")
         yield
