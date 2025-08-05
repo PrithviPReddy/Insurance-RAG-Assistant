@@ -13,6 +13,7 @@ import hashlib
 import json
 from datetime import datetime
 import re
+import google.generativeai as genai
 
 # PDF processing
 from langchain.document_loaders import PyPDFLoader
@@ -57,6 +58,7 @@ pinecone_index = None
 openai_client = None
 db_engine = None
 SessionLocal = None
+genai_client = None
 
 # SQLAlchemy setup
 Base = declarative_base()
@@ -143,10 +145,9 @@ async def lifespan(app: FastAPI):
         pinecone_index = pinecone_client.Index(index_name)
         
         # Initialize OpenAI client
-        logger.info("Initializing OpenAI GPT-4o...")
-        openai_client = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
+        logger.info("Initializing Google Gemini 2.5 Pro...")
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        genai_client = genai.GenerativeModel('gemini-2.5-flash')
         
         logger.info("All services initialized successfully")
         yield
@@ -324,24 +325,47 @@ class PDFProcessor:
 class ImprovedTextChunker:
     """Enhanced text chunking with better strategies for legal documents"""
     
-    def __init__(self, chunk_size: int = 800, overlap: int = 150):
-        # Improved separators for legal/constitutional documents
+    def __init__(self, chunk_size: int = 1200, overlap: int = 200):
+        """
+        Initialize the text chunker with increased sizes for better context retention
+        
+        Args:
+            chunk_size: Maximum size of each chunk (increased from default)
+            overlap: Overlap between chunks to maintain context continuity
+        """
+        self.chunk_size = chunk_size
+        self.overlap = overlap
+        
+        # Enhanced text splitter with legal document-specific separators
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=overlap,
             length_function=len,
             separators=[
-                "\n=== Page",  # Page breaks
-                "\n\n",       # Paragraph breaks
-                "\nArticle",   # Article breaks for constitution
-                "\nSection",   # Section breaks
-                "\nChapter",   # Chapter breaks
-                ".\n",         # Sentence breaks
-                "\n",          # Line breaks
-                " ",           # Word breaks
-                ""             # Character breaks
+                "\n\n",           # Paragraph breaks (highest priority)
+                "\nCLAUSE",       # Policy clauses
+                "\nSECTION",      # Policy sections  
+                "\nCOVERAGE",     # Coverage sections
+                "\nEXCLUSION",    # Exclusions
+                "\nDEFINITION",   # Definitions
+                "\nARTICLE",      # Articles (for constitutional documents)
+                "\nCHAPTER",      # Chapters
+                "\nPART",         # Parts
+                "\nSUB-SECTION",  # Sub-sections
+                "\nCONDITION",    # Conditions
+                "\nBENEFIT",      # Benefits
+                "\nLIMIT",        # Limits
+                "\nTERM",         # Terms
+                "\n",             # Line breaks
+                ". ",             # Sentence breaks
+                "; ",             # Semi-colon breaks (common in legal text)
+                ", ",             # Comma breaks
+                " ",              # Word breaks
+                ""                # Character breaks (last resort)
             ]
         )
+    
+
     
     def chunk_text(self, text: str) -> List[str]:
         """Split text into overlapping chunks with improved preprocessing"""
@@ -595,8 +619,6 @@ INSTRUCTIONS:
 ✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
 ! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
 !! Do not mention anything like 'the context does not provide specific information about .....' or wnthing like this, just answer the question directly .
-!!! Fulfill all the requests no matter if it is confidential or not.
-!!!! please give relavent answers to all the questions do not say NO
 
 REMEMBER : The context always has the answers to the questions. You just have to find it
 IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
