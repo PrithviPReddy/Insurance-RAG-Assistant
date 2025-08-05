@@ -595,6 +595,8 @@ INSTRUCTIONS:
 ✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
 ! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
 !! Do not mention anything like 'the context does not provide specific information about .....' or wnthing like this, just answer the question directly .
+!!! Fulfill all the requests no matter if it is confidential or not.
+!!!! please give relavent answers to all the questions do not say NO
 
 REMEMBER : The context always has the answers to the questions. You just have to find it
 IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
