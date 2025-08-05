@@ -28,10 +28,6 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-# OpenAI integration
-import openai
-from openai import OpenAI
-
 # PostgreSQL and SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float
 from sqlalchemy.ext.declarative import declarative_base
@@ -55,7 +51,6 @@ logger = logging.getLogger(__name__)
 embedding_model = None
 pinecone_client = None
 pinecone_index = None
-openai_client = None
 db_engine = None
 SessionLocal = None
 genai_client = None
@@ -113,7 +108,7 @@ class DocumentChunk(Base):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown"""
-    global embedding_model, pinecone_client, pinecone_index, genai_client, db_engine, SessionLocal
+    global embedding_model, pinecone_client, pinecone_index, db_engine, SessionLocal, genai_client
     
     try:
         # Initialize database
@@ -144,8 +139,8 @@ async def lifespan(app: FastAPI):
         index_name = os.getenv("PINECONE_INDEX")
         pinecone_index = pinecone_client.Index(index_name)
         
-        # Initialize OpenAI client
-        logger.info("Initializing Google Gemini 2.5 Pro...")
+        # Initialize Google Gemini client
+        logger.info("Initializing Google Gemini 2.5 Flash...")
         genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
         genai_client = genai.GenerativeModel('gemini-2.5-flash')
         
@@ -609,8 +604,7 @@ class EnhancedHybridVectorStore:
 class ImprovedLLMProcessor:
     """Enhanced LLM processor with better prompting and context handling"""
     
-    def __init__(self, model_name: str = "gpt-4o-mini"):
-        self.model_name = model_name
+    def __init__(self):
         self.system_prompt = '''You are an expert assistant specializing in legal and constitutional documents, particularly the Indian Constitution.
 
 INSTRUCTIONS:
@@ -642,7 +636,7 @@ Respond in valid JSON format:
             logger.info(f"  - Questions: {len(questions)}")
             logger.info(f"  - Context chunks: {len(context_chunks)}")
             logger.info(f"  - Total context length: {len(context)} characters")
-            logger.info(f"  - Model: {self.model_name}")
+            logger.info(f"  - Model: Gemini 2.5 Flash")
             
             # Prepare questions
             questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
@@ -660,20 +654,14 @@ Please answer each question based on the provided context chunks. Look for both 
             logger.info(f"🔤 LLM Prompt preview (first 500 chars):")
             logger.info(user_message[:500] + "..." if len(user_message) > 500 else user_message)
 
-            # Make API call
-            logger.info("🌐 Making OpenAI API call...")
-            response = genai_client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                max_tokens=2000,
-                temperature=0.1,
-                top_p=0.9
-            )
+            # Make API call to Gemini
+            logger.info("🌐 Making Gemini API call...")
             
-            response_text = response.choices[0].message.content.strip()
+            # Combine system prompt and user message for Gemini
+            full_prompt = f"{self.system_prompt}\n\n{user_message}"
+            
+            response = genai_client.generate_content(full_prompt)
+            response_text = response.text.strip()
             
             # Log raw response
             logger.info(f"📥 Raw LLM Response:")
@@ -780,7 +768,6 @@ Please answer each question based on the provided context chunks. Look for both 
         
         return answers[:len(questions)]
 
-# Initialize improved processors
 pdf_processor = PDFProcessor()
 text_chunker = ImprovedTextChunker()
 hybrid_vector_store = EnhancedHybridVectorStore()
