@@ -152,7 +152,7 @@ Respond in valid JSON format:
         # NOTE: Using 'gemini-1.5-flash-latest' as 'gemini-2.5-flash' is not yet a standard identifier.
         # This ensures the code uses the most current and powerful public Flash model available.
         gemini_model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-latest",
+            model_name="gemini-2.5-flash",
             system_instruction=system_instruction,
             generation_config={"response_mime_type": "application/json"}
         )
