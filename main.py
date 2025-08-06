@@ -143,7 +143,7 @@ Follow these instructions precisely:
         # Configure the Gemini model with system instructions and to output JSON
         # Safety settings have been removed as per user request for direct evaluation.
         gemini_model = genai.GenerativeModel(
-            model_name=gemini-2.5-pro,
+            model_name="gemini-2.5-pro",
             system_instruction=system_instruction,
             generation_config={"response_mime_type": "application/json"}
         )
