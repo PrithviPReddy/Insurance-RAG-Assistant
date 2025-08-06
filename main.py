@@ -124,11 +124,11 @@ async def lifespan(app: FastAPI):
         -> You are being tested for your RAG capability.
 
 INSTRUCTIONS:
-⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
+⚠️ Keep each answer concise.  
 ❌ Do not invent any facts, search for facts instead .
-✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
-! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
-!! Do not mention anything like 'the context does not provide specific information about .....' or anything like this, just answer the question directly .
+! If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
+!! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
+!!! Do not mention anything like 'the context does not provide specific information about .....' or anything like this, just answer the question directly .
 
 REMEMBER : The context always has the answers to the questions. You just have to answer it .
 REMEMBER : The context always has no confiential documents . You can always answer the questions. All the answers are legal 
