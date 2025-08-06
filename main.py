@@ -1,164 +1,174 @@
-# main.py
-
-# --- Core Imports ---
-import os
-import logging
-import hashlib
-import json
-import re
-import uuid
-from datetime import datetime
-from contextlib import asynccontextmanager
-from typing import List, Optional, Dict
-
-# --- Third-party Imports ---
-# FastAPI
-from fastapi import FastAPI, HTTPException, Depends, status, APIRouter
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import APIRouter
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, HttpUrl
-
-# Environment Management
-from dotenv import load_dotenv
-
-# Database (SQLAlchemy & PostgreSQL with pgvector)
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean
-from sqlalchemy.orm import sessionmaker, Session, declarative_base
-from sqlalchemy.dialects.postgresql import UUID
-from pgvector.sqlalchemy import Vector
-
-# PDF & Text Processing
+from typing import List, Optional
 import requests
 import tempfile
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+import os
+from pathlib import Path
+import logging
+from contextlib import asynccontextmanager
+import hashlib
+import json
+from datetime import datetime
+import re
 
-# AI & Embeddings
-from sentence_transformers import SentenceTransformer, util
-import google.generativeai as genai
+# PDF processing
+from langchain.document_loaders import PyPDFLoader
+import tempfile
+
+# Vector database and embeddings
+import pinecone
+from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 
-# --- Initial Setup ---
+# Text processing
+from sentence_transformers import SentenceTransformer
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# OpenAI integration
+import openai
+from openai import OpenAI
+
+# PostgreSQL and SQLAlchemy
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.dialects.postgresql import UUID, ARRAY
+from pgvector.sqlalchemy import Vector
+import uuid
+
+import logging
+from typing import List
+
+# Environment variables
+from dotenv import load_dotenv
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Global Variables ---
-# These will be initialized in the lifespan manager
+# Global variables for models and clients
 embedding_model = None
-gemini_model = None
+pinecone_client = None
+pinecone_index = None
+openai_client = None
 db_engine = None
 SessionLocal = None
 
-# --- Database Model Setup ---
+# SQLAlchemy setup
 Base = declarative_base()
 
+
+def log_document_content(content: str, max_chars: int = 1000):
+    """Log first part of document content for debugging"""
+    logger.info(f"📄 Document content preview ({len(content)} total chars):")
+    logger.info(f"First {max_chars} characters:")
+    logger.info("-" * 50)
+    logger.info(content[:max_chars])
+    logger.info("-" * 50)
+
+def log_chunks_preview(chunks: List[str], max_chunks: int = 3):
+    """Log preview of created chunks"""
+    logger.info(f"📦 Created {len(chunks)} chunks. Preview of first {max_chunks}:")
+    for i, chunk in enumerate(chunks[:max_chunks]):
+        logger.info(f"Chunk {i+1} ({len(chunk)} chars): {chunk[:200]}...")
+
+def log_search_results(question: str, chunks: List[str], max_results: int = 2):
+    """Log search results for debugging"""
+    logger.info(f"🔍 Search results for: '{question[:50]}...'")
+    logger.info(f"Found {len(chunks)} relevant chunks:")
+    for i, chunk in enumerate(chunks[:max_results]):
+        logger.info(f"Result {i+1}: {chunk[:150]}...")
+
+# Database Models
 class Document(Base):
-    """SQLAlchemy model for storing document metadata."""
+    """Store document metadata and processing status"""
     __tablename__ = "documents"
+    
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     url = Column(String, unique=True, index=True, nullable=False)
     url_hash = Column(String, unique=True, index=True, nullable=False)
-    content_hash = Column(String, nullable=False)
+    title = Column(String, nullable=True)
+    content = Column(Text, nullable=False)
     processed_at = Column(DateTime, default=datetime.utcnow)
     chunk_count = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
 
 class DocumentChunk(Base):
-    """SQLAlchemy model for storing document chunks and their embeddings."""
+    """Store document chunks with embeddings"""
     __tablename__ = "document_chunks"
+    
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(384))  # all-MiniLM-L6-v2 produces 384-dim vectors
+    embedding = Column(Vector(384))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-# --- Lifespan Manager for Resource Initialization ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Handles startup and shutdown events for the FastAPI application."""
-    global embedding_model, gemini_model, db_engine, SessionLocal
-    logger.info("Application startup: Initializing resources...")
+    """Initialize resources on startup and cleanup on shutdown"""
+    global embedding_model, pinecone_client, pinecone_index, openai_client, db_engine, SessionLocal
+    
     try:
-        # 1. Database Connection
+        # Initialize database
+        logger.info("Connecting to PostgreSQL database...")
         DATABASE_URL = os.getenv("DATABASE_URL")
         if not DATABASE_URL:
-            raise ValueError("DATABASE_URL environment variable not set.")
+            raise ValueError("DATABASE_URL not found in environment variables")
+        
         db_engine = create_engine(DATABASE_URL)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
+        
+        # Create tables
         Base.metadata.create_all(bind=db_engine)
-        logger.info("Database connection successful and tables verified.")
-
-        # 2. Embedding Model
-        model_name = 'all-MiniLM-L6-v2'
-        embedding_model = SentenceTransformer(model_name)
-        logger.info(f"Embedding model '{model_name}' loaded successfully.")
-
-        # 3. Google Gemini Model
-        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-        if not GOOGLE_API_KEY:
-            raise ValueError("GOOGLE_API_KEY environment variable not set.")
-        genai.configure(api_key=GOOGLE_API_KEY)
-
-        # Safer, more effective system prompt
-        system_instruction = """You are an expert Q&A assistant for legal and policy documents. Your task is to answer questions based *only* on the provided context.
-
-INSTRUCTIONS:
-1. Read the user's questions and the provided context chunks carefully.
-2. For each question, find the answer directly within the context.
-3. Your answers must be concise, ideally 1-2 sentences.
-4. **Crucially, do not add any information that is not present in the context.** Do not make assumptions or invent facts.
-5. **If the answer to a question cannot be found in the provided context, you MUST respond with the exact phrase: "Information not available in the provided context."** This is not a failure; it is the correct action when the information is missing.
-6. You must provide an answer for every question, even if it's the "Information not available" response.
-
-Respond in a valid JSON object with a single key "answers" that contains a list of strings. For example:
-{
-  "answers": [
-    "Answer to question 1.",
-    "Information not available in the provided context.",
-    "Answer to question 3."
-  ]
-}"""
-
-        gemini_model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-latest",
-            system_instruction=system_instruction,
-            generation_config={"response_mime_type": "application/json"}
+        logger.info("Database tables created/verified")
+        
+        # Initialize embedding model
+        logger.info("Loading embedding model...")
+        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+       
+        # Initialize Pinecone client
+        logger.info("Initializing Pinecone...")
+        pinecone_client = Pinecone(
+            api_key=os.getenv("PINECONE_API_KEY"),
+            environment=os.getenv("PINECONE_ENVIRONMENT")
         )
-        logger.info("Google Gemini 1.5 Flash model initialized successfully.")
-
-        yield  # Application is now running
-
+        
+        # Create or connect to index
+        index_name = os.getenv("PINECONE_INDEX")
+        pinecone_index = pinecone_client.Index(index_name)
+        
+        # Initialize OpenAI client
+        logger.info("Initializing OpenAI GPT-4o...")
+        openai_client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
+        
+        logger.info("All services initialized successfully")
+        yield
+        
     except Exception as e:
-        logger.error(f"Fatal error during application startup: {e}")
+        logger.error(f"Failed to initialize services: {e}")
         raise
     finally:
-        logger.info("Application shutdown: Cleaning up resources.")
-        # Cleanup can be added here if needed
+        logger.info("Shutting down services")
 
-# --- FastAPI App Initialization ---
+# Initialize FastAPI app with lifespan
 app = FastAPI(
-    title="Advanced RAG API with Gemini 1.5 Flash",
-    description="A robust RAG system for document Q&A, featuring intelligent re-ranking and Google's Gemini 1.5 Flash.",
-    version="3.0.0",
+    title="HackRx RAG API with Enhanced Retrieval",
+    description="Enhanced RAG system with improved retrieval for insurance policy document processing",
+    version="2.1.0",
     lifespan=lifespan
 )
 
-# --- Security and Authentication ---
+# Security
 security = HTTPBearer()
-VALID_TOKEN = os.getenv("BEARER_TOKEN")
-if not VALID_TOKEN:
-    raise ValueError("BEARER_TOKEN environment variable is not set.")
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Validates the bearer token provided in the request."""
-    if credentials.scheme != "Bearer" or credentials.credentials != VALID_TOKEN:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing authentication token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return credentials
-
-# --- Pydantic Models for API Schema ---
+# Pydantic models
 class ProcessRequest(BaseModel):
     documents: HttpUrl
     questions: List[str]
@@ -166,264 +176,720 @@ class ProcessRequest(BaseModel):
 class ProcessResponse(BaseModel):
     answers: List[str]
 
-# --- Helper Functions ---
+VALID_TOKEN = os.getenv("BEARER_TOKEN")
+
+if not VALID_TOKEN:
+    raise ValueError("BEARER_TOKEN is not set in the environment. Please set it before running the app.")
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Verify Bearer token"""
+    if credentials.credentials != VALID_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials
+
 def get_db():
-    """Dependency to get a new database session for each request."""
+    """Get database session"""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-def get_content_hash(content: str) -> str:
-    """Generates a SHA256 hash for a string to detect content changes."""
-    return hashlib.sha256(content.encode()).hexdigest()
-
-# --- Core Logic Classes ---
-
-class PDFProcessor:
-    """Handles downloading and extracting text from PDF documents."""
-    @staticmethod
-    def download_and_extract(url: str) -> str:
-        logger.info(f"Downloading PDF from {url}")
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                response = requests.get(url, headers=headers, timeout=60)
-                response.raise_for_status()
-                temp_file.write(response.content)
-                temp_file_path = temp_file.name
-
-            logger.info("PDF downloaded. Extracting text with PyPDFLoader...")
-            loader = PyPDFLoader(temp_file_path)
-            pages = loader.load()
-            text = "\n".join([page.page_content for page in pages])
-            logger.info(f"Text extraction complete. Total characters: {len(text)}")
-            return text
-        except requests.RequestException as e:
-            logger.error(f"Failed to download PDF: {e}")
-            raise HTTPException(status_code=400, detail=f"Could not download PDF from URL: {e}")
-        except Exception as e:
-            logger.error(f"Failed to process PDF: {e}")
-            raise HTTPException(status_code=500, detail=f"Error processing PDF file: {e}")
-        finally:
-            if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-
-class TextChunker:
-    """Splits text into manageable, overlapping chunks."""
-    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len,
-            separators=["\n\n", "\n", ". ", " ", ""]
-        )
-
-    def chunk(self, text: str) -> List[str]:
-        logger.info("Chunking text...")
-        chunks = self.text_splitter.split_text(text)
-        logger.info(f"Text split into {len(chunks)} chunks.")
-        return chunks
+def get_url_hash(url: str) -> str:
+    """Generate hash for URL to use as unique identifier"""
+    return hashlib.sha256(url.encode()).hexdigest()
 
 class DatabaseManager:
-    """Manages all database interactions for documents and chunks."""
+    """Handle database operations for document caching"""
+    
     @staticmethod
-    def get_document_by_hash(db: Session, url_hash: str, content_hash: str) -> Optional[Document]:
-        return db.query(Document).filter(
-            Document.url_hash == url_hash,
-            Document.content_hash == content_hash
-        ).first()
-
+    def get_document_by_url(db: Session, url: str) -> Optional[Document]:
+        """Check if document already exists in database"""
+        url_hash = get_url_hash(url)
+        return db.query(Document).filter(Document.url_hash == url_hash, Document.is_active == True).first()
+    
     @staticmethod
-    def save_document_and_chunks(db: Session, url: str, text_content: str, chunks: List[str]) -> Document:
-        url_hash = get_content_hash(url)
-        content_hash = get_content_hash(text_content)
-        
+    def save_document(db: Session, url: str, content: str, chunks: List[str]) -> Document:
+        """Save document and its chunks to database"""
         try:
-            logger.info("Saving new document and chunks to the database.")
-            doc = Document(
+            url_hash = get_url_hash(url)
+            
+            # Create document record
+            document = Document(
                 url=url,
                 url_hash=url_hash,
-                content_hash=content_hash,
+                content=content,
                 chunk_count=len(chunks)
             )
-            db.add(doc)
-            db.flush()  # To get the generated doc.id
-
-            embeddings = embedding_model.encode(chunks, show_progress_bar=True)
+            db.add(document)
+            db.flush()  # Get the document ID
             
-            chunk_objects = []
-            for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
-                chunk_obj = DocumentChunk(
-                    document_id=doc.id,
+            # Generate embeddings for chunks
+            embeddings = embedding_model.encode(chunks)
+            
+            # Save chunks with embeddings
+            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                chunk_record = DocumentChunk(
+                    document_id=document.id,
                     chunk_index=i,
-                    content=chunk_text,
+                    content=chunk,
                     embedding=embedding.tolist()
                 )
-                chunk_objects.append(chunk_obj)
+                db.add(chunk_record)
             
-            db.bulk_save_objects(chunk_objects)
             db.commit()
-            logger.info(f"Successfully saved document {doc.id} with {len(chunks)} chunks.")
-            return doc
+            logger.info(f"Saved document with {len(chunks)} chunks to database")
+            return document
+            
         except Exception as e:
             db.rollback()
-            logger.error(f"Database error while saving document: {e}")
-            raise HTTPException(status_code=500, detail="Failed to save document to database.")
-
+            logger.error(f"Failed to save document to database: {e}")
+            raise
+    
     @staticmethod
-    def get_chunks_for_document(db: Session, document_id: uuid.UUID) -> List[Dict]:
-        chunks = db.query(DocumentChunk.content, DocumentChunk.embedding).filter(
-            DocumentChunk.document_id == document_id
-        ).all()
-        return [{"content": c.content, "embedding": np.array(c.embedding)} for c in chunks]
-
-class EnhancedRAGRetriever:
-    """Implements an advanced retrieval strategy with vector search and re-ranking."""
-    def __init__(self, all_chunks: List[Dict]):
-        self.all_chunks = all_chunks
-        self.corpus_embeddings = np.array([chunk['embedding'] for chunk in all_chunks])
-        logger.info(f"RAG Retriever initialized with {len(all_chunks)} chunks.")
-
-    def retrieve(self, query: str, top_k: int = 20) -> List[str]:
-        """
-        Retrieves the most relevant chunks for a given query.
-        1. Encodes the query.
-        2. Performs a semantic search to find the top_k initial candidates.
-        3. Re-ranks these candidates for better contextual relevance.
-        """
-        logger.info(f"Retrieving context for query: '{query[:80]}...'")
-        query_embedding = embedding_model.encode(query, convert_to_tensor=True)
-
-        # 1. Semantic Search (Initial Retrieval)
-        # Using cosine similarity to find the top_k most similar chunks
-        cos_scores = util.cos_sim(query_embedding, self.corpus_embeddings)[0]
-        top_results = np.argpartition(-cos_scores, range(top_k))[:top_k]
-        
-        # 2. Re-ranking
-        # Here, we could use a more advanced cross-encoder, but for simplicity and speed,
-        # we'll re-rank based on the initial cosine scores which is often sufficient.
-        # The key is retrieving a larger pool first (top_k) and then selecting the best.
-        
-        ranked_chunks = sorted(
-            [
-                (cos_scores[i], self.all_chunks[i]['content']) for i in top_results
-            ], 
-            key=lambda x: x[0], 
-            reverse=True
-        )
-
-        # Select the top N chunks after re-ranking (e.g., top 10)
-        final_context_chunks = [content for score, content in ranked_chunks[:10]]
-        logger.info(f"Retrieved and re-ranked, selected {len(final_context_chunks)} final chunks.")
-        
-        return final_context_chunks
-
-class GeminiProcessor:
-    """Handles interaction with the Google Gemini API."""
+    def get_document_chunks(db: Session, document_id: uuid.UUID) -> List[DocumentChunk]:
+        """Get all chunks for a document"""
+        return db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).all()
+    
     @staticmethod
-    def generate_answers(questions: List[str], context_chunks: List[str]) -> List[str]:
-        if not context_chunks:
-            logger.warning("LLM processor called with no context. Returning default message.")
-            return ["Information not available in the provided context." for _ in questions]
-
-        context_str = "\n\n".join([f"--- Context Chunk {i+1} ---\n{chunk}" for i, chunk in enumerate(context_chunks)])
-        questions_str = "\n".join([f"{i+1}. {q}" for i, q in enumerate(questions)])
-
-        prompt = f"""
-CONTEXT:
-{context_str}
-
-QUESTIONS:
-Based *only* on the context provided above, answer the following questions:
-{questions_str}
-"""
-        logger.info(f"Sending prompt to Gemini. Context length: {len(context_str)}, Questions: {len(questions)}")
-        
+    def search_similar_chunks(db: Session, query_embedding: List[float], limit: int = 15) -> List[DocumentChunk]:
+        """Search for similar chunks using vector similarity with more results"""
         try:
-            response = gemini_model.generate_content(prompt)
-            response_text = response.text
+            # Use pgvector's cosine similarity with increased limit
+            chunks = db.query(DocumentChunk).order_by(
+                DocumentChunk.embedding.cosine_distance(query_embedding)
+            ).limit(limit).all()
             
-            # The model is configured for JSON output, so we parse it directly.
-            parsed_json = json.loads(response_text)
-            answers = parsed_json.get("answers", [])
-
-            if not isinstance(answers, list) or len(answers) != len(questions):
-                raise ValueError("LLM returned malformed JSON or incorrect number of answers.")
-            
-            logger.info("Successfully received and parsed answers from Gemini.")
-            return answers
-
+            return chunks
         except Exception as e:
-            logger.error(f"Error communicating with Gemini API: {e}")
-            logger.error(f"Raw response text (if available): {getattr(response, 'text', 'N/A')}")
-            # Fallback in case of API or parsing error
-            return [f"Error generating answer: {e}" for _ in questions]
+            logger.error(f"Failed to search similar chunks: {e}")
+            return []
 
+class PDFProcessor:
+    """Handle PDF download and text extraction using LangChain"""
+    
+    @staticmethod
+    def download_and_extract_pdf(url: str) -> str:
+        """Download PDF from URL and extract text using LangChain PyPDFLoader"""
+        try:
+            # Create temporary file for PDF
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                # Download PDF
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = requests.get(url, headers=headers, timeout=60)  # Increased timeout
+                response.raise_for_status()
+                
+                if 'application/pdf' not in response.headers.get('content-type', ''):
+                    logger.warning(f"Content type is not PDF: {response.headers.get('content-type')}")
+                
+                # Write PDF content to temp file
+                temp_file.write(response.content)
+                temp_file_path = temp_file.name
+            
+            try:
+                # Use LangChain PyPDFLoader to extract text
+                loader = PyPDFLoader(temp_file_path)
+                pages = loader.load()
+                
+                # Combine all pages with better formatting
+                text = ""
+                for i, page in enumerate(pages):
+                    page_content = page.page_content.strip()
+                    if page_content:  # Only add non-empty pages
+                        text += f"\n=== Page {i + 1} ===\n{page_content}\n"
+                
+                if not text.strip():
+                    raise ValueError("No text could be extracted from the PDF")
+                
+                logger.info(f"Extracted {len(text)} characters from {len(pages)} pages")
+                return text.strip()
+            
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(temp_file_path)
+                except:
+                    pass
+            
+        except Exception as e:
+            logger.error(f"Failed to download and extract PDF: {e}")
+            raise HTTPException(status_code=400, detail=f"Failed to process PDF: {str(e)}")
 
-# --- API Endpoint ---
+class ImprovedTextChunker:
+    """Enhanced text chunking with better strategies for legal documents"""
+    
+    def __init__(self, chunk_size: int = 800, overlap: int = 150):
+        # Improved separators for legal/constitutional documents
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=overlap,
+            length_function=len,
+            separators=[
+                "\n=== Page",  # Page breaks
+                "\n\n",       # Paragraph breaks
+                "\nArticle",   # Article breaks for constitution
+                "\nSection",   # Section breaks
+                "\nChapter",   # Chapter breaks
+                ".\n",         # Sentence breaks
+                "\n",          # Line breaks
+                " ",           # Word breaks
+                ""             # Character breaks
+            ]
+        )
+    
+    def chunk_text(self, text: str) -> List[str]:
+        """Split text into overlapping chunks with improved preprocessing"""
+        try:
+            # Clean and preprocess text
+            cleaned_text = self.preprocess_text(text)
+            
+            # Split into chunks
+            chunks = self.text_splitter.split_text(cleaned_text)
+            
+            # Post-process chunks
+            processed_chunks = []
+            for chunk in chunks:
+                processed_chunk = self.postprocess_chunk(chunk)
+                if len(processed_chunk.strip()) > 100:  # Only keep substantial chunks
+                    processed_chunks.append(processed_chunk)
+            
+            logger.info(f"Created {len(processed_chunks)} processed chunks from text")
+            return processed_chunks
+            
+        except Exception as e:
+            logger.error(f"Failed to chunk text: {e}")
+            return []
+    
+    def preprocess_text(self, text: str) -> str:
+        """Clean and preprocess text for better chunking"""
+        # Remove excessive whitespace
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+        
+        # Fix common OCR issues
+        text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)  # Fix hyphenated words
+        
+        # Normalize spacing around articles and sections
+        text = re.sub(r'\b(Article|Section|Chapter)\s+(\d+)', r'\n\1 \2', text)
+        
+        return text.strip()
+    
+    def postprocess_chunk(self, chunk: str) -> str:
+        """Clean up individual chunks"""
+        # Remove page markers at the start/end of chunks
+        chunk = re.sub(r'^=== Page \d+ ===\s*', '', chunk)
+        chunk = re.sub(r'\s*=== Page \d+ ===$', '', chunk)
+        
+        # Clean up whitespace
+        chunk = re.sub(r'\s+', ' ', chunk)
+        chunk = chunk.strip()
+        
+        return chunk
+
+class EnhancedHybridVectorStore:
+    """Enhanced hybrid vector storage with improved search strategies"""
+    
+    def __init__(self):
+        self.namespace = "insurance_docs"
+    
+    def search_postgresql_enhanced(self, db: Session, query: str, limit: int = 15) -> List[str]:
+        """Enhanced PostgreSQL search with query expansion"""
+        try:
+            # Generate embeddings for original query
+            original_embedding = embedding_model.encode([query])[0].tolist()
+            
+            # Get similar chunks
+            chunks = DatabaseManager.search_similar_chunks(db, original_embedding, limit)
+            
+            # Extract content and log similarity scores for debugging
+            results = []
+            for chunk in chunks:
+                results.append(chunk.content)
+            
+            logger.info(f"PostgreSQL search found {len(results)} chunks for query: '{query[:50]}...'")
+            return results
+            
+        except Exception as e:
+            logger.error(f"PostgreSQL search failed: {e}")
+            return []
+    
+    def search_pinecone_enhanced(self, query: str, limit: int = 10) -> List[str]:
+        """Enhanced Pinecone search with multiple query strategies"""
+        try:
+            query_embedding = embedding_model.encode([query])[0].tolist()
+            
+            results = pinecone_index.query(
+                vector=query_embedding,
+                top_k=limit,
+                namespace=self.namespace,
+                include_metadata=True
+            )
+            
+            documents = []
+            for match in results.matches:
+                if 'text' in match.metadata:
+                    documents.append(match.metadata['text'])
+            
+            logger.info(f"Pinecone search found {len(documents)} chunks")
+            return documents
+            
+        except Exception as e:
+            logger.error(f"Pinecone search failed: {e}")
+            return []
+    
+    def multi_query_search(self, db: Session, original_query: str) -> List[str]:
+        """Search using multiple query variations for better coverage"""
+        all_results = set()
+        
+        # Original query
+        results1 = self.search_postgresql_enhanced(db, original_query, limit=10)
+        all_results.update(results1)
+        
+        # Query variations for better coverage
+        query_variations = self.generate_query_variations(original_query)
+        
+        for variation in query_variations[:2]:  # Limit to 2 variations to avoid too many results
+            results = self.search_postgresql_enhanced(db, variation, limit=5)
+            all_results.update(results)
+        
+        # Convert back to list and limit
+        final_results = list(all_results)[:15]  # Increased limit
+        logger.info(f"Multi-query search found {len(final_results)} unique chunks")
+        
+        return final_results
+    
+    def generate_query_variations(self, query: str) -> List[str]:
+        """Generate query variations for better retrieval"""
+        variations = []
+        
+        # Extract key terms
+        key_terms = self.extract_key_terms(query)
+        
+        if key_terms:
+            # Create variations with key terms
+            variations.append(" ".join(key_terms))
+            
+            # Create individual key term queries
+            for term in key_terms[:2]:  # Limit to top 2 key terms
+                variations.append(term)
+        
+        return variations
+    
+    def extract_key_terms(self, query: str) -> List[str]:
+        """Extract key terms from query"""
+        # Simple keyword extraction
+        import re
+        
+        # Remove common stop words
+        stop_words = {'what', 'is', 'the', 'how', 'does', 'are', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+        
+        # Extract words (keep important terms like Article, Constitution, etc.)
+        words = re.findall(r'\b[A-Za-z]+\b', query.lower())
+        key_terms = [word for word in words if word not in stop_words and len(word) > 2]
+        
+        # Prioritize legal/constitutional terms
+        priority_terms = ['constitution', 'article', 'amendment', 'rights', 'fundamental', 'directive', 'principles', 'president', 'supreme', 'court', 'parliament', 'state', 'emergency']
+        
+        prioritized = []
+        for term in priority_terms:
+            if term in key_terms:
+                prioritized.append(term)
+        
+        # Add remaining terms
+        for term in key_terms:
+            if term not in prioritized:
+                prioritized.append(term)
+        
+        return prioritized[:5]  # Return top 5 key terms
+    
+    def hybrid_search_enhanced(self, db: Session, query: str) -> List[str]:
+        """Enhanced hybrid search with multiple strategies"""
+        # Try multi-query search first
+        results = self.multi_query_search(db, query)
+        
+        if results:
+            logger.info(f"Enhanced search found {len(results)} results from PostgreSQL")
+            return results
+        else:
+            logger.info("No results from PostgreSQL, trying Pinecone fallback")
+            return self.search_pinecone_enhanced(query, limit=15)
+    
+    def add_to_pinecone_fallback(self, chunks: List[str]):
+        """Add chunks to Pinecone as fallback"""
+        try:
+            embeddings = embedding_model.encode(chunks)
+            batch_size = 20
+            
+            for batch_idx in range(0, len(chunks), batch_size):
+                batch_end = min(batch_idx + batch_size, len(chunks))
+                batch_chunks = chunks[batch_idx:batch_end]
+                batch_embeddings = embeddings[batch_idx:batch_end]
+                
+                vectors = []
+                for i, (chunk, embedding) in enumerate(zip(batch_chunks, batch_embeddings)):
+                    vectors.append({
+                        "id": f"chunk_{batch_idx + i}_{hash(chunk) % 1000000}",
+                        "values": embedding.tolist(),
+                        "metadata": {
+                            "text": chunk,
+                            "chunk_id": batch_idx + i,
+                            "text_length": len(chunk)
+                        }
+                    })
+                
+                pinecone_index.upsert(vectors=vectors, namespace=self.namespace)
+            
+            logger.info(f"Added {len(chunks)} chunks to Pinecone fallback")
+        except Exception as e:
+            logger.error(f"Failed to add to Pinecone fallback: {e}")
+
+class ImprovedLLMProcessor:
+    """Enhanced LLM processor with better prompting and context handling"""
+    
+    def __init__(self, model_name: str = "gpt-4o-mini"):
+        self.model_name = model_name
+        self.system_prompt = '''You are an expert assistant specializing in legal and constitutional documents, particularly the Indian Constitution.
+
+INSTRUCTIONS:
+⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
+❌ Do not invent any facts.  
+✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
+! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
+!! Do not mention anything like 'the context does not provide specific information about .....' or wnthing like this, just answer the question directly .
+
+REMEMBER : The context always has the answers to the questions. You just have to find it
+IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
+
+Respond in valid JSON format:
+{
+  "answers": [
+    "Answer to question 1",
+    "Answer to question 2"
+  ]
+}'''
+    
+    def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
+        """Generate answers with improved context handling and logging"""
+        try:
+            # Prepare context with better formatting
+            context = self.format_context(context_chunks)
+            
+            # Log what we're sending to LLM
+            logger.info(f"📤 Sending to LLM:")
+            logger.info(f"  - Questions: {len(questions)}")
+            logger.info(f"  - Context chunks: {len(context_chunks)}")
+            logger.info(f"  - Total context length: {len(context)} characters")
+            logger.info(f"  - Model: {self.model_name}")
+            
+            # Prepare questions
+            questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
+            
+            # Create user message with better structure
+            user_message = f"""CONTEXT CHUNKS:
+{context}
+
+QUESTIONS TO ANSWER:
+{questions_text}
+
+Please answer each question based on the provided context chunks. Look for both direct information and related concepts that can help answer the questions."""
+
+            # Log the actual prompt (truncated)
+            logger.info(f"🔤 LLM Prompt preview (first 500 chars):")
+            logger.info(user_message[:500] + "..." if len(user_message) > 500 else user_message)
+
+            # Make API call
+            logger.info("🌐 Making OpenAI API call...")
+            response = openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                max_tokens=2000,
+                temperature=0.1,
+                top_p=0.9
+            )
+            
+            response_text = response.choices[0].message.content.strip()
+            
+            # Log raw response
+            logger.info(f"📥 Raw LLM Response:")
+            logger.info(response_text)
+            
+            logger.info(f"✅ Generated answers for {len(questions)} questions")
+            
+            # Parse JSON response
+            parsed_answers = self.parse_response(response_text, questions)
+            
+            # Log parsed answers
+            logger.info(f"📋 Parsed Answers:")
+            for i, answer in enumerate(parsed_answers, 1):
+                logger.info(f"  {i}. {answer}")
+            
+            return parsed_answers
+            
+        except Exception as e:
+            logger.error(f"💥 Failed to generate answers: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return [f"Error processing question: {str(e)}" for _ in questions]
+    
+    def format_context(self, chunks: List[str]) -> str:
+        """Format context chunks for better LLM understanding"""
+        formatted_chunks = []
+        
+        for i, chunk in enumerate(chunks):
+            # Clean up chunk
+            clean_chunk = chunk.strip()
+            
+            # Add chunk with numbering for reference
+            formatted_chunks.append(f"[Chunk {i+1}]\n{clean_chunk}")
+        
+        return "\n\n".join(formatted_chunks)
+    
+    def parse_response(self, response_text: str, questions: List[str]) -> List[str]:
+        """Parse LLM response with improved error handling"""
+        try:
+            import json
+            import re
+            
+            # Try to extract JSON
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                json_match = re.search(r'\{.*?"answers"\s*:\s*\[.*?\].*?\}', response_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    json_str = response_text
+            
+            parsed_response = json.loads(json_str)
+            
+            if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
+                answers = parsed_response["answers"]
+                
+                # Ensure correct number of answers
+                while len(answers) < len(questions):
+                    answers.append("Unable to find relevant information in the provided context.")
+                
+                return answers[:len(questions)]
+            else:
+                raise ValueError("Invalid JSON structure")
+                
+        except Exception as json_error:
+            logger.warning(f"JSON parsing failed: {json_error}")
+            logger.warning(f"Raw response: {response_text[:500]}...")
+            
+            # Fallback parsing
+            return self.fallback_parse(response_text, questions)
+    
+    def fallback_parse(self, response_text: str, questions: List[str]) -> List[str]:
+        """Fallback parsing when JSON parsing fails"""
+        lines = response_text.split('\n')
+        answers = []
+        current_answer = ""
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Skip headers and formatting
+            if line.startswith(('```', '{', '}', '"answers"', 'CONTEXT', 'QUESTIONS')):
+                continue
+            
+            # Check if it's a numbered answer
+            if re.match(r'^\d+\.', line):
+                if current_answer:
+                    answers.append(current_answer.strip())
+                current_answer = re.sub(r'^\d+\.\s*', '', line)
+            elif line and current_answer:
+                current_answer += " " + line
+            elif line and not current_answer:
+                current_answer = line
+        
+        # Add the last answer
+        if current_answer:
+            answers.append(current_answer.strip())
+        
+        # Ensure we have enough answers
+        while len(answers) < len(questions):
+            answers.append("Unable to process this question due to response parsing issues.")
+        
+        return answers[:len(questions)]
+
+# Initialize improved processors
+pdf_processor = PDFProcessor()
+text_chunker = ImprovedTextChunker()
+hybrid_vector_store = EnhancedHybridVectorStore()
+llm_processor = ImprovedLLMProcessor()
+
+# Create router
 router = APIRouter(prefix="/api/v1")
 
-@router.post("/process", response_model=ProcessResponse, dependencies=[Depends(verify_token)])
-async def process_documents_and_questions(request: ProcessRequest, db: Session = Depends(get_db)):
-    """
-    Main endpoint to process a document and answer questions about it.
-    - Downloads and processes the PDF if not in cache.
-    - Uses an advanced RAG retriever to find the best context.
-    - Uses Gemini 1.5 Flash to generate answers.
-    """
-    url = str(request.documents)
-    logger.info(f"--- New Request --- URL: {url}, Questions: {len(request.questions)}")
-
-    # Step 1: Download and get content hash
-    text_content = PDFProcessor.download_and_extract(url)
-    if not text_content or len(text_content) < 100:
-        raise HTTPException(status_code=400, detail="Failed to extract sufficient text from the document.")
-    
-    content_hash = get_content_hash(text_content)
-    url_hash = get_content_hash(url)
-
-    # Step 2: Check cache
-    doc = DatabaseManager.get_document_by_hash(db, url_hash, content_hash)
-    
-    if doc:
-        logger.info(f"Cache hit. Using existing document chunks for doc ID: {doc.id}")
-        all_chunks = DatabaseManager.get_chunks_for_document(db, doc.id)
-    else:
-        logger.info("Cache miss. Processing and storing new document.")
-        # Step 2a: Chunk and save if not in cache
-        chunker = TextChunker()
-        chunks = chunker.chunk(text_content)
-        new_doc = DatabaseManager.save_document_and_chunks(db, url, text_content, chunks)
-        all_chunks = DatabaseManager.get_chunks_for_document(db, new_doc.id)
-
-    # Step 3: Retrieve relevant context for all questions
-    retriever = EnhancedRAGRetriever(all_chunks)
-    
-    # Consolidate context from all questions to provide a broader view to the LLM
-    consolidated_context = set()
-    for question in request.questions:
-        chunks_for_q = retriever.retrieve(question)
-        for chunk in chunks_for_q:
-            consolidated_context.add(chunk)
+@router.post("/hackrx/run", response_model=ProcessResponse)
+async def process_documents(
+    request: ProcessRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Process documents with enhanced retrieval and debugging"""
+    try:
+        logger.info("=" * 80)
+        logger.info(f"🚀 NEW REQUEST: Processing {len(request.questions)} questions")
+        logger.info(f"📎 Document URL: {str(request.documents)}")
+        logger.info("Questions to answer:")
+        for i, q in enumerate(request.questions, 1):
+            logger.info(f"  {i}. {q}")
+        logger.info("=" * 80)
+        
+        url = str(request.documents)
+        
+        # Step 1: Check cache
+        cached_document = DatabaseManager.get_document_by_url(db, url)
+        
+        if cached_document:
+            logger.info(f"✅ Document found in cache with {cached_document.chunk_count} chunks")
+            # Log cached content preview
+            log_document_content(cached_document.content, 500)
+        else:
+            logger.info("❌ Document not in cache. Processing new document...")
             
-    final_context = list(consolidated_context)
-    logger.info(f"Consolidated context from all questions into {len(final_context)} unique chunks.")
+            # Extract and process document
+            logger.info("📥 Downloading and extracting PDF...")
+            text = pdf_processor.download_and_extract_pdf(url)
+            
+            # Log extracted content
+            log_document_content(text, 1000)
+            
+            if len(text) < 100:
+                raise HTTPException(status_code=400, detail="Extracted text is too short")
+            
+            # Enhanced chunking
+            logger.info("✂️ Chunking document...")
+            chunks = text_chunker.chunk_text(text)
+            
+            if not chunks:
+                raise HTTPException(status_code=400, detail="No valid chunks created")
+            
+            # Log chunks preview
+            log_chunks_preview(chunks, 5)
+            
+            # Save to database
+            logger.info("💾 Saving to database...")
+            cached_document = DatabaseManager.save_document(db, url, text, chunks)
+            
+            # Add to Pinecone fallback
+            logger.info("🌲 Adding to Pinecone fallback...")
+            hybrid_vector_store.add_to_pinecone_fallback(chunks)
+        
+        # Step 2: Enhanced question processing
+        logger.info("🤔 Processing questions with enhanced retrieval...")
+        
+        # Collect relevant chunks with improved search
+        all_relevant_chunks = set()
+        
+        for i, question in enumerate(request.questions, 1):
+            logger.info(f"\n--- Processing Question {i}/{len(request.questions)} ---")
+            logger.info(f"Question: {question}")
+            
+            relevant_chunks = hybrid_vector_store.hybrid_search_enhanced(db, question)
+            
+            # Log search results
+            log_search_results(question, relevant_chunks, 2)
+            
+            all_relevant_chunks.update(relevant_chunks[:5])  # Top 5 per question
+        
+        # Final chunk selection
+        final_chunks = list(all_relevant_chunks)[:20]
+        
+        logger.info(f"\n📋 FINAL CONTEXT: Selected {len(final_chunks)} unique chunks")
+        logger.info("Context preview:")
+        for i, chunk in enumerate(final_chunks[:3]):
+            logger.info(f"Context {i+1}: {chunk[:100]}...")
+        
+        if not final_chunks:
+            logger.warning("❌ No relevant chunks found!")
+            answers = ["No relevant information found in the document." for _ in request.questions]
+        else:
+            # Generate answers with improved processing
+            logger.info("🧠 Generating answers with LLM...")
+            answers = llm_processor.generate_answers(request.questions, final_chunks)
+            
+            # Log generated answers
+            logger.info("📝 Generated answers:")
+            for i, answer in enumerate(answers, 1):
+                logger.info(f"Answer {i}: {answer[:100]}...")
+        
+        logger.info(f"✅ Successfully processed all {len(request.questions)} questions")
+        logger.info("=" * 80)
+        
+        # Validate response
+        if len(answers) != len(request.questions):
+            logger.warning(f"⚠️ Answer count mismatch: {len(answers)} vs {len(request.questions)}")
+            while len(answers) < len(request.questions):
+                answers.append("Unable to process this question.")
+            answers = answers[:len(request.questions)]
+        
+        return ProcessResponse(answers=answers)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"💥 Unexpected error: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-    # Step 4: Generate answers using Gemini
-    answers = GeminiProcessor.generate_answers(request.questions, final_context)
+        
+@router.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "message": "Enhanced HackRx RAG API is running"}
 
-    return ProcessResponse(answers=answers)
+@router.get("/cache/stats")
+async def cache_stats(db: Session = Depends(get_db)):
+    """Get cache statistics"""
+    try:
+        total_docs = db.query(Document).filter(Document.is_active == True).count()
+        total_chunks = db.query(DocumentChunk).count()
+        
+        return {
+            "cached_documents": total_docs,
+            "total_chunks": total_chunks,
+            "cache_status": "active",
+            "version": "2.1.0 - Enhanced Retrieval"
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
+# Include router
 app.include_router(router)
 
-@app.get("/", include_in_schema=False)
+@app.get("/")
 async def root():
+    """Root endpoint"""
     return {
-        "message": "Welcome to the Advanced RAG API with Gemini 1.5 Flash",
-        "api_docs": "/docs"
+        "message": "HackRx Enhanced RAG API with Improved Retrieval",
+        "version": "2.1.0",
+        "improvements": [
+            "Better text chunking for legal documents",
+            "Enhanced query expansion and search",
+            "Improved context formatting for LLM",
+            "Multi-query search strategies",
+            "Better fallback parsing"
+        ],
+        "endpoints": {
+            "process": "/api/v1/hackrx/run",
+            "health": "/api/v1/health",
+            "cache_stats": "/api/v1/cache/stats"
+        }
     }
 
-# To run this application:
-# uvicorn main:app --reload
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
