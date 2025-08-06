@@ -143,7 +143,7 @@ Follow these instructions precisely:
         # Configure the Gemini model with system instructions and to output JSON
         # Safety settings have been removed as per user request for direct evaluation.
         gemini_model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
+            model_name="gemini-1.5-flash-latest",
             system_instruction=system_instruction,
             generation_config={"response_mime_type": "application/json"}
         )
@@ -777,7 +777,7 @@ async def cache_stats(db: Session = Depends(get_db)):
             "cached_documents": total_docs,
             "total_chunks": total_chunks,
             "cache_status": "active",
-            "version": "2.3.5 - Gemini 2.5 Flash"
+            "version": "2.3.6 - Gemini 2.5 Flash"
         }
     except Exception as e:
         return {"error": str(e)}
@@ -790,8 +790,8 @@ async def root():
     """Root endpoint"""
     return {
         "message": "HackRx Enhanced RAG API with Google Gemini 2.5 Flash",
-        "version": "2.3.5",
-        "llm_model": "gemini-2.5-flash (as alias for 2.5)",
+        "version": "2.3.6",
+        "llm_model": "gemini-1.5-flash-latest (as alias for 2.5)",
         "improvements": [
             "Updated to target Gemini 2.5 Flash technology",
             "Switched from OpenAI GPT to Google Gemini Flash",
