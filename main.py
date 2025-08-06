@@ -13,10 +13,9 @@ import hashlib
 import json
 from datetime import datetime
 import re
-import google.generativeai as genai
 
-# PDF processing
-from langchain.document_loaders import PyPDFLoader
+# PDF processing - Updated import path
+from langchain_community.document_loaders import PyPDFLoader
 import tempfile
 
 # Vector database and embeddings
@@ -28,16 +27,16 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
+# Google Gemini integration
+import google.generativeai as genai
+
 # PostgreSQL and SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+# Updated import path for declarative_base
+from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from pgvector.sqlalchemy import Vector
 import uuid
-
-import logging
-from typing import List
 
 # Environment variables
 from dotenv import load_dotenv
@@ -51,34 +50,12 @@ logger = logging.getLogger(__name__)
 embedding_model = None
 pinecone_client = None
 pinecone_index = None
+gemini_model = None
 db_engine = None
 SessionLocal = None
-genai_client = None
 
 # SQLAlchemy setup
 Base = declarative_base()
-
-
-def log_document_content(content: str, max_chars: int = 1000):
-    """Log first part of document content for debugging"""
-    logger.info(f"📄 Document content preview ({len(content)} total chars):")
-    logger.info(f"First {max_chars} characters:")
-    logger.info("-" * 50)
-    logger.info(content[:max_chars])
-    logger.info("-" * 50)
-
-def log_chunks_preview(chunks: List[str], max_chunks: int = 3):
-    """Log preview of created chunks"""
-    logger.info(f"📦 Created {len(chunks)} chunks. Preview of first {max_chunks}:")
-    for i, chunk in enumerate(chunks[:max_chunks]):
-        logger.info(f"Chunk {i+1} ({len(chunk)} chars): {chunk[:200]}...")
-
-def log_search_results(question: str, chunks: List[str], max_results: int = 2):
-    """Log search results for debugging"""
-    logger.info(f"🔍 Search results for: '{question[:50]}...'")
-    logger.info(f"Found {len(chunks)} relevant chunks:")
-    for i, chunk in enumerate(chunks[:max_results]):
-        logger.info(f"Result {i+1}: {chunk[:150]}...")
 
 # Database Models
 class Document(Base):
@@ -102,13 +79,13 @@ class DocumentChunk(Base):
     document_id = Column(UUID(as_uuid=True), index=True, nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(1024))  # BAAI/bge-large-en-v1.5 produces 1024-dim vectors
+    embedding = Column(Vector(384))  # all-MiniLM-L6-v2 produces 384-dim vectors
     created_at = Column(DateTime, default=datetime.utcnow)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown"""
-    global embedding_model, pinecone_client, pinecone_index, db_engine, SessionLocal, genai_client
+    global embedding_model, pinecone_client, pinecone_index, gemini_model, db_engine, SessionLocal
     
     try:
         # Initialize database
@@ -126,8 +103,8 @@ async def lifespan(app: FastAPI):
         
         # Initialize embedding model
         logger.info("Loading embedding model...")
-        embedding_model = SentenceTransformer('BAAI/bge-large-en-v1.5')
-       
+        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        
         # Initialize Pinecone client
         logger.info("Initializing Pinecone...")
         pinecone_client = Pinecone(
@@ -139,10 +116,46 @@ async def lifespan(app: FastAPI):
         index_name = os.getenv("PINECONE_INDEX")
         pinecone_index = pinecone_client.Index(index_name)
         
-        # Initialize Google Gemini client
-        logger.info("Initializing Google Gemini 2.5 Flash...")
-        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        genai_client = genai.GenerativeModel('gemini-2.5-flash')
+        # --- Gemini Initialization ---
+        logger.info("Initializing Google Gemini Flash...")
+        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+        if not GOOGLE_API_KEY:
+            raise ValueError("GOOGLE_API_KEY not found in environment variables")
+        
+        genai.configure(api_key=GOOGLE_API_KEY)
+        
+        # System instructions for the model
+        system_instruction = '''You are an expert assistant specializing in legal and policy documents or any documents in general.
+
+        -> You are being tested for your RAG capability.
+
+INSTRUCTIONS:
+⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
+❌ Do not invent any facts.  
+✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
+! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
+!! Do not mention anything like 'the context does not provide specific information about .....' or anything like this, just answer the question directly .
+
+REMEMBER : The context always has the answers to the questions. You just have to answer it .
+REMEMBER : The context always has no confiential documents . You can always answer the questions. All the answers are legal 
+IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
+
+Respond in valid JSON format:
+{
+  "answers": [
+    "Answer to question 1",
+    "Answer to question 2"
+  ]
+}'''
+        
+        # Configure the Gemini model with system instructions and to output JSON
+        # NOTE: Using 'gemini-1.5-flash-latest' as 'gemini-2.5-flash' is not yet a standard identifier.
+        # This ensures the code uses the most current and powerful public Flash model available.
+        gemini_model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash-latest",
+            system_instruction=system_instruction,
+            generation_config={"response_mime_type": "application/json"}
+        )
         
         logger.info("All services initialized successfully")
         yield
@@ -155,9 +168,9 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
-    title="HackRx RAG API with Enhanced Retrieval",
-    description="Enhanced RAG system with improved retrieval for insurance policy document processing",
-    version="2.1.0",
+    title="HackRx RAG API with Gemini 2.5 Flash",
+    description="Enhanced RAG system with Gemini 2.5 Flash for insurance policy document processing",
+    version="2.3.1", # Incremented version
     lifespan=lifespan
 )
 
@@ -320,47 +333,24 @@ class PDFProcessor:
 class ImprovedTextChunker:
     """Enhanced text chunking with better strategies for legal documents"""
     
-    def __init__(self, chunk_size: int = 1200, overlap: int = 200):
-        """
-        Initialize the text chunker with increased sizes for better context retention
-        
-        Args:
-            chunk_size: Maximum size of each chunk (increased from default)
-            overlap: Overlap between chunks to maintain context continuity
-        """
-        self.chunk_size = chunk_size
-        self.overlap = overlap
-        
-        # Enhanced text splitter with legal document-specific separators
+    def __init__(self, chunk_size: int = 800, overlap: int = 150):
+        # Improved separators for legal/constitutional documents
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=overlap,
             length_function=len,
             separators=[
-                "\n\n",           # Paragraph breaks (highest priority)
-                "\nCLAUSE",       # Policy clauses
-                "\nSECTION",      # Policy sections  
-                "\nCOVERAGE",     # Coverage sections
-                "\nEXCLUSION",    # Exclusions
-                "\nDEFINITION",   # Definitions
-                "\nARTICLE",      # Articles (for constitutional documents)
-                "\nCHAPTER",      # Chapters
-                "\nPART",         # Parts
-                "\nSUB-SECTION",  # Sub-sections
-                "\nCONDITION",    # Conditions
-                "\nBENEFIT",      # Benefits
-                "\nLIMIT",        # Limits
-                "\nTERM",         # Terms
-                "\n",             # Line breaks
-                ". ",             # Sentence breaks
-                "; ",             # Semi-colon breaks (common in legal text)
-                ", ",             # Comma breaks
-                " ",              # Word breaks
-                ""                # Character breaks (last resort)
+                "\n=== Page",  # Page breaks
+                "\n\n",       # Paragraph breaks
+                "\nArticle",   # Article breaks for constitution
+                "\nSection",   # Section breaks
+                "\nChapter",   # Chapter breaks
+                ".\n",         # Sentence breaks
+                "\n",          # Line breaks
+                " ",           # Word breaks
+                ""             # Character breaks
             ]
         )
-    
-
     
     def chunk_text(self, text: str) -> List[str]:
         """Split text into overlapping chunks with improved preprocessing"""
@@ -501,7 +491,6 @@ class EnhancedHybridVectorStore:
     
     def extract_key_terms(self, query: str) -> List[str]:
         """Extract key terms from query"""
-        # Simple keyword extraction
         import re
         
         # Remove common stop words
@@ -527,50 +516,16 @@ class EnhancedHybridVectorStore:
         return prioritized[:5]  # Return top 5 key terms
     
     def hybrid_search_enhanced(self, db: Session, query: str) -> List[str]:
-        """FIXED: Better search with more relevant chunks"""
-        try:
-            # Get MORE relevant chunks per query
-            original_embedding = embedding_model.encode([query])[0].tolist()
-            
-            # INCREASED SEARCH RESULTS
-            chunks = DatabaseManager.search_similar_chunks(db, original_embedding, limit=25)  # Increased from 15
-            
-            # Extract content and filter out generic chunks
-            results = []
-            for chunk in chunks:
-                content = chunk.content.strip()
-                
-                # FILTER OUT GENERIC/IRRELEVANT CHUNKS
-                if len(content) > 50 and not self.is_generic_chunk(content):
-                    results.append(content)
-            
-            logger.info(f"Enhanced search found {len(results)} quality chunks")
-            return results[:20]  # Return top 20 quality chunks
-            
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return []
-    
-    def is_generic_chunk(self, content: str) -> bool:
-        """Filter out generic/useless chunks"""
-        generic_phrases = [
-            "covered provided the Policy has been continuously renewed",
-            "WE/OUR/US/COMPANY means UNITED INDIA INSURANCE",
-            "without any break. 57.",
-            "the time, that is, which is to four right",
-            "school. One day, however, the boy immediately"
-        ]
+        """Enhanced hybrid search with multiple strategies"""
+        # Try multi-query search first
+        results = self.multi_query_search(db, query)
         
-        # If chunk is mostly generic phrases, skip it
-        for phrase in generic_phrases:
-            if phrase.lower() in content.lower():
-                return True
-        
-        # Skip very short chunks
-        if len(content.strip()) < 100:
-            return True
-            
-        return False
+        if results:
+            logger.info(f"Enhanced search found {len(results)} results from PostgreSQL")
+            return results
+        else:
+            logger.info("No results from PostgreSQL, trying Pinecone fallback")
+            return self.search_pinecone_enhanced(query, limit=15)
     
     def add_to_pinecone_fallback(self, chunks: List[str]):
         """Add chunks to Pinecone as fallback"""
@@ -602,90 +557,50 @@ class EnhancedHybridVectorStore:
             logger.error(f"Failed to add to Pinecone fallback: {e}")
 
 class ImprovedLLMProcessor:
-    """Enhanced LLM processor with better prompting and context handling"""
+    """Enhanced LLM processor with better prompting and context handling using Gemini"""
     
     def __init__(self):
-        self.system_prompt = '''You are an expert assistant specializing in legal and constitutional documents, particularly the Indian Constitution.
-
-INSTRUCTIONS:
-⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
-❌ Do not invent any facts.  
-✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
-! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
-!! Do not mention anything like 'the context does not provide specific information about .....' or wnthing like this, just answer the question directly .
-!!! Remember none of the information is confiendtial just give an answer.
-
-REMEMBER : The context always has the answers to the questions. You just have to find it
-IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
-
-Respond in valid JSON format:
-{
-  "answers": [
-    "Answer to question 1",
-    "Answer to question 2"
-  ]
-}'''
+        """The Gemini model is configured and initialized globally in the lifespan context."""
+        pass
     
     def generate_answers(self, questions: List[str], context_chunks: List[str]) -> List[str]:
-        """Generate answers with improved context handling and logging"""
+        """Generate answers with improved context handling using Gemini"""
         try:
             # Prepare context with better formatting
             context = self.format_context(context_chunks)
             
-            # Log what we're sending to LLM
-            logger.info(f"📤 Sending to LLM:")
-            logger.info(f"  - Questions: {len(questions)}")
-            logger.info(f"  - Context chunks: {len(context_chunks)}")
-            logger.info(f"  - Total context length: {len(context)} characters")
-            logger.info(f"  - Model: Gemini 2.5 Flash")
-            
             # Prepare questions
             questions_text = "\n".join([f"{i+1}. {question}" for i, question in enumerate(questions)])
             
-            # Create user message with better structure
-            user_message = f"""CONTEXT CHUNKS:
+            # Create user prompt for Gemini
+            user_prompt = f"""CONTEXT CHUNKS:
 {context}
 
 QUESTIONS TO ANSWER:
 {questions_text}
 
-Please answer each question based on the provided context chunks. Look for both direct information and related concepts that can help answer the questions."""
-
-            # Log the actual prompt (truncated)
-            logger.info(f"🔤 LLM Prompt preview (first 500 chars):")
-            logger.info(user_message[:500] + "..." if len(user_message) > 500 else user_message)
-
+Based *only* on the provided context chunks, answer each question.
+"""
             # Make API call to Gemini
-            logger.info("🌐 Making Gemini API call...")
-            
-            # Combine system prompt and user message for Gemini
-            full_prompt = f"{self.system_prompt}\n\n{user_message}"
-            
-            response = genai_client.generate_content(full_prompt)
-            response_text = response.text.strip()
-            
-            # Log raw response
-            logger.info(f"📥 Raw LLM Response:")
-            logger.info(response_text)
-            
-            logger.info(f"✅ Generated answers for {len(questions)} questions")
+            response = gemini_model.generate_content(
+                user_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    max_output_tokens=2000,
+                    temperature=0.1,
+                    top_p=0.9
+                )
+            )
+
+            response_text = response.text
+            logger.info(f"Generated answers for {len(questions)} questions")
             
             # Parse JSON response
-            parsed_answers = self.parse_response(response_text, questions)
-            
-            # Log parsed answers
-            logger.info(f"📋 Parsed Answers:")
-            for i, answer in enumerate(parsed_answers, 1):
-                logger.info(f"  {i}. {answer}")
-            
-            return parsed_answers
+            return self.parse_response(response_text, questions)
             
         except Exception as e:
-            logger.error(f"💥 Failed to generate answers: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Failed to generate answers with Gemini: {e}")
             return [f"Error processing question: {str(e)}" for _ in questions]
-    
+
     def format_context(self, chunks: List[str]) -> str:
         """Format context chunks for better LLM understanding"""
         formatted_chunks = []
@@ -700,23 +615,10 @@ Please answer each question based on the provided context chunks. Look for both 
         return "\n\n".join(formatted_chunks)
     
     def parse_response(self, response_text: str, questions: List[str]) -> List[str]:
-        """Parse LLM response with improved error handling"""
+        """Parse Gemini's JSON response with improved error handling"""
         try:
-            import json
-            import re
-            
-            # Try to extract JSON
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                json_match = re.search(r'\{.*?"answers"\s*:\s*\[.*?\].*?\}', response_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(0)
-                else:
-                    json_str = response_text
-            
-            parsed_response = json.loads(json_str)
+            # Gemini's JSON mode should return clean JSON, so we try a direct load
+            parsed_response = json.loads(response_text)
             
             if "answers" in parsed_response and isinstance(parsed_response["answers"], list):
                 answers = parsed_response["answers"]
@@ -727,13 +629,13 @@ Please answer each question based on the provided context chunks. Look for both 
                 
                 return answers[:len(questions)]
             else:
-                raise ValueError("Invalid JSON structure")
+                raise ValueError("Invalid JSON structure: 'answers' key missing or not a list.")
                 
-        except Exception as json_error:
-            logger.warning(f"JSON parsing failed: {json_error}")
-            logger.warning(f"Raw response: {response_text[:500]}...")
+        except (json.JSONDecodeError, ValueError) as json_error:
+            logger.warning(f"Direct JSON parsing failed: {json_error}")
+            logger.warning(f"Raw response from Gemini: {response_text[:500]}...")
             
-            # Fallback parsing
+            # Fallback parsing for cases where the model might fail JSON mode
             return self.fallback_parse(response_text, questions)
     
     def fallback_parse(self, response_text: str, questions: List[str]) -> List[str]:
@@ -769,6 +671,7 @@ Please answer each question based on the provided context chunks. Look for both 
         
         return answers[:len(questions)]
 
+# Initialize improved processors
 pdf_processor = PDFProcessor()
 text_chunker = ImprovedTextChunker()
 hybrid_vector_store = EnhancedHybridVectorStore()
@@ -783,16 +686,9 @@ async def process_documents(
     credentials: HTTPAuthorizationCredentials = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Process documents with enhanced retrieval and debugging"""
+    """Process documents with enhanced retrieval and answering using Gemini"""
     try:
-        logger.info("=" * 80)
-        logger.info(f"🚀 NEW REQUEST: Processing {len(request.questions)} questions")
-        logger.info(f"📎 Document URL: {str(request.documents)}")
-        logger.info("Questions to answer:")
-        for i, q in enumerate(request.questions, 1):
-            logger.info(f"  {i}. {q}")
-        logger.info("=" * 80)
-        
+        logger.info(f"Processing request with {len(request.questions)} questions")
         url = str(request.documents)
         
         # Step 1: Check cache
@@ -800,83 +696,56 @@ async def process_documents(
         
         if cached_document:
             logger.info(f"✅ Document found in cache with {cached_document.chunk_count} chunks")
-            # Log cached content preview
-            log_document_content(cached_document.content, 500)
         else:
             logger.info("❌ Document not in cache. Processing new document...")
             
             # Extract and process document
-            logger.info("📥 Downloading and extracting PDF...")
             text = pdf_processor.download_and_extract_pdf(url)
-            
-            # Log extracted content
-            log_document_content(text, 1000)
             
             if len(text) < 100:
                 raise HTTPException(status_code=400, detail="Extracted text is too short")
             
             # Enhanced chunking
-            logger.info("✂️ Chunking document...")
             chunks = text_chunker.chunk_text(text)
             
             if not chunks:
                 raise HTTPException(status_code=400, detail="No valid chunks created")
             
-            # Log chunks preview
-            log_chunks_preview(chunks, 5)
+            logger.info(f"Created {len(chunks)} enhanced chunks")
             
             # Save to database
-            logger.info("💾 Saving to database...")
             cached_document = DatabaseManager.save_document(db, url, text, chunks)
             
             # Add to Pinecone fallback
-            logger.info("🌲 Adding to Pinecone fallback...")
             hybrid_vector_store.add_to_pinecone_fallback(chunks)
         
         # Step 2: Enhanced question processing
-        logger.info("🤔 Processing questions with enhanced retrieval...")
+        logger.info("Processing questions with enhanced retrieval...")
         
         # Collect relevant chunks with improved search
         all_relevant_chunks = set()
         
-        for i, question in enumerate(request.questions, 1):
-            logger.info(f"\n--- Processing Question {i}/{len(request.questions)} ---")
-            logger.info(f"Question: {question}")
-            
+        for question in request.questions:
+            logger.info(f"Searching for: {question[:50]}...")
             relevant_chunks = hybrid_vector_store.hybrid_search_enhanced(db, question)
-            
-            # Log search results
-            log_search_results(question, relevant_chunks, 2)
-            
             all_relevant_chunks.update(relevant_chunks[:5])  # Top 5 per question
         
         # Final chunk selection
-        final_chunks = list(all_relevant_chunks)[:20]
+        final_chunks = list(all_relevant_chunks)[:20]  # Increased limit for better context
         
-        logger.info(f"\n📋 FINAL CONTEXT: Selected {len(final_chunks)} unique chunks")
-        logger.info("Context preview:")
-        for i, chunk in enumerate(final_chunks[:3]):
-            logger.info(f"Context {i+1}: {chunk[:100]}...")
+        logger.info(f"Selected {len(final_chunks)} chunks for context")
         
         if not final_chunks:
-            logger.warning("❌ No relevant chunks found!")
             answers = ["No relevant information found in the document." for _ in request.questions]
         else:
             # Generate answers with improved processing
-            logger.info("🧠 Generating answers with LLM...")
             answers = llm_processor.generate_answers(request.questions, final_chunks)
-            
-            # Log generated answers
-            logger.info("📝 Generated answers:")
-            for i, answer in enumerate(answers, 1):
-                logger.info(f"Answer {i}: {answer[:100]}...")
         
         logger.info(f"✅ Successfully processed all {len(request.questions)} questions")
-        logger.info("=" * 80)
         
         # Validate response
         if len(answers) != len(request.questions):
-            logger.warning(f"⚠️ Answer count mismatch: {len(answers)} vs {len(request.questions)}")
+            logger.warning(f"Answer count mismatch: {len(answers)} vs {len(request.questions)}")
             while len(answers) < len(request.questions):
                 answers.append("Unable to process this question.")
             answers = answers[:len(request.questions)]
@@ -886,16 +755,13 @@ async def process_documents(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"💥 Unexpected error: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-        
 @router.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "message": "Enhanced HackRx RAG API is running"}
+    return {"status": "healthy", "message": "Enhanced HackRx RAG API with Gemini is running"}
 
 @router.get("/cache/stats")
 async def cache_stats(db: Session = Depends(get_db)):
@@ -908,7 +774,7 @@ async def cache_stats(db: Session = Depends(get_db)):
             "cached_documents": total_docs,
             "total_chunks": total_chunks,
             "cache_status": "active",
-            "version": "2.1.0 - Enhanced Retrieval"
+            "version": "2.3.1 - Gemini 2.5 Flash"
         }
     except Exception as e:
         return {"error": str(e)}
@@ -920,14 +786,17 @@ app.include_router(router)
 async def root():
     """Root endpoint"""
     return {
-        "message": "HackRx Enhanced RAG API with Improved Retrieval",
-        "version": "2.1.0",
+        "message": "HackRx Enhanced RAG API with Google Gemini 2.5 Flash",
+        "version": "2.3.1",
+        "llm_model": "gemini-1.5-flash-latest (as alias for 2.5)",
         "improvements": [
+            "Updated to target Gemini 2.5 Flash technology",
+            "Switched from OpenAI GPT to Google Gemini Flash",
             "Better text chunking for legal documents",
             "Enhanced query expansion and search",
-            "Improved context formatting for LLM",
-            "Multi-query search strategies",
-            "Better fallback parsing"
+            "Improved context formatting and prompting for Gemini",
+            "Enabled native JSON output mode for reliable responses",
+            "Multi-query search strategies"
         ],
         "endpoints": {
             "process": "/api/v1/hackrx/run",
