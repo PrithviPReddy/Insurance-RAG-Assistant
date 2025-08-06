@@ -131,7 +131,7 @@ async def lifespan(app: FastAPI):
 
 INSTRUCTIONS:
 ⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
-❌ Do not invent any facts, search for facts instead.
+❌ Do not invent any facts, search for facts instead .
 ✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
 ! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
 !! Do not mention anything like 'the context does not provide specific information about .....' or anything like this, just answer the question directly .
