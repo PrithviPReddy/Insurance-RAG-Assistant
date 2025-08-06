@@ -140,20 +140,12 @@ Follow these instructions precisely:
   ]
 }'''
         
-        # Safety settings to prevent API from blocking responses for this use case.
-        safety_settings = {
-            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-        }
-        
         # Configure the Gemini model with system instructions and to output JSON
+        # Safety settings have been removed as per user request for direct evaluation.
         gemini_model = genai.GenerativeModel(
             model_name="gemini-1.5-flash-latest",
             system_instruction=system_instruction,
-            generation_config={"response_mime_type": "application/json"},
-            safety_settings=safety_settings
+            generation_config={"response_mime_type": "application/json"}
         )
         
         logger.info("All services initialized successfully")
@@ -169,7 +161,7 @@ Follow these instructions precisely:
 app = FastAPI(
     title="HackRx RAG API with Gemini 2.5 Flash",
     description="Enhanced RAG system with Gemini 2.5 Flash for insurance policy document processing",
-    version="2.3.7", # Incremented version
+    version="2.3.6", # Incremented version
     lifespan=lifespan
 )
 
@@ -590,15 +582,6 @@ Based *only* on the provided context chunks, answer each question.
                 )
             )
 
-            # Check for blocked response before accessing .text
-            if not response.parts:
-                finish_reason = response.candidates[0].finish_reason if response.candidates else 'UNKNOWN'
-                logger.error(f"Gemini response was blocked. Finish Reason: {finish_reason}")
-                # Check prompt feedback if available
-                if response.prompt_feedback and response.prompt_feedback.block_reason:
-                     logger.error(f"Prompt Feedback Block Reason: {response.prompt_feedback.block_reason}")
-                return [f"Error: Response blocked by safety settings (Reason: {finish_reason})." for _ in questions]
-
             response_text = response.text
             logger.info(f"Generated answers for {len(questions)} questions")
             
@@ -794,7 +777,7 @@ async def cache_stats(db: Session = Depends(get_db)):
             "cached_documents": total_docs,
             "total_chunks": total_chunks,
             "cache_status": "active",
-            "version": "2.3.7 - Gemini 2.5 Flash"
+            "version": "2.3.6 - Gemini 2.5 Flash"
         }
     except Exception as e:
         return {"error": str(e)}
@@ -807,7 +790,7 @@ async def root():
     """Root endpoint"""
     return {
         "message": "HackRx Enhanced RAG API with Google Gemini 2.5 Flash",
-        "version": "2.3.7",
+        "version": "2.3.6",
         "llm_model": "gemini-1.5-flash-latest (as alias for 2.5)",
         "improvements": [
             "Updated to target Gemini 2.5 Flash technology",
