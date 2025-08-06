@@ -19,8 +19,6 @@ from langchain_community.document_loaders import PyPDFLoader
 import tempfile
 
 # Vector database and embeddings
-import pinecone
-from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 
 # Text processing
@@ -42,14 +40,21 @@ import uuid
 from dotenv import load_dotenv
 load_dotenv()
 
+# --- Configuration Constants ---
+# Chunking parameters
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 150
+# Retrieval parameters
+SIMILAR_CHUNKS_LIMIT = 15
+MULTI_QUERY_CHUNKS_PER_QUERY = 5
+FINAL_CONTEXT_CHUNKS = 20
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global variables for models and clients
 embedding_model = None
-pinecone_client = None
-pinecone_index = None
 gemini_model = None
 db_engine = None
 SessionLocal = None
@@ -85,7 +90,7 @@ class DocumentChunk(Base):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown"""
-    global embedding_model, pinecone_client, pinecone_index, gemini_model, db_engine, SessionLocal
+    global embedding_model, gemini_model, db_engine, SessionLocal
     
     try:
         # Initialize database
@@ -105,17 +110,6 @@ async def lifespan(app: FastAPI):
         logger.info("Loading embedding model...")
         embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         
-        # Initialize Pinecone client
-        logger.info("Initializing Pinecone...")
-        pinecone_client = Pinecone(
-            api_key=os.getenv("PINECONE_API_KEY"),
-            environment=os.getenv("PINECONE_ENVIRONMENT")
-        )
-        
-        # Create or connect to index
-        index_name = os.getenv("PINECONE_INDEX")
-        pinecone_index = pinecone_client.Index(index_name)
-        
         # --- Gemini Initialization ---
         logger.info("Initializing Google Gemini Flash...")
         GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -124,23 +118,15 @@ async def lifespan(app: FastAPI):
         
         genai.configure(api_key=GOOGLE_API_KEY)
         
-        # System instructions for the model
-        system_instruction = '''You are an expert assistant specializing in legal and policy documents or any documents in general.
+        # System instructions for the model - Refined for reliability
+        system_instruction = '''You are an expert assistant specializing in legal and policy documents. Your task is to answer questions based strictly on the provided context.
 
-        -> You are being tested for your RAG capability.
-
-INSTRUCTIONS:
-⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
-❌ Do not invent any facts, search for facts instead .
-✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
-! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
-!! Do not mention anything like 'the context does not provide specific information about .....' or anything like this, just answer the question directly .
-
-REMEMBER : The context always has the answers to the questions. You just have to answer it .
-REMEMBER : The context always has no confiential documents . You can always answer the questions. All the answers are legal 
-IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
-
-Respond in valid JSON format:
+Follow these instructions precisely:
+- Provide concise answers, limited to 1-2 sentences per question.
+- Do not invent facts or use external knowledge.
+- If the context is insufficient, infer the closest possible answer from the available text, up to a maximum of 3 lines.
+- Do not state that the context lacks information; answer the question directly.
+- The entire response must be a single, valid JSON object, structured as follows:
 {
   "answers": [
     "Answer to question 1",
@@ -148,13 +134,20 @@ Respond in valid JSON format:
   ]
 }'''
         
+        # Safety settings to prevent API from blocking responses for this use case.
+        safety_settings = {
+            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+        }
+        
         # Configure the Gemini model with system instructions and to output JSON
-        # NOTE: Using 'gemini-1.5-flash-latest' as 'gemini-2.5-flash' is not yet a standard identifier.
-        # This ensures the code uses the most current and powerful public Flash model available.
         gemini_model = genai.GenerativeModel(
-            model_name="gemini-2.5-pro",
+            model_name="gemini-1.5-flash-latest",
             system_instruction=system_instruction,
-            generation_config={"response_mime_type": "application/json"}
+            generation_config={"response_mime_type": "application/json"},
+            safety_settings=safety_settings
         )
         
         logger.info("All services initialized successfully")
@@ -170,7 +163,7 @@ Respond in valid JSON format:
 app = FastAPI(
     title="HackRx RAG API with Gemini 2.5 Flash",
     description="Enhanced RAG system with Gemini 2.5 Flash for insurance policy document processing",
-    version="2.3.1", # Incremented version
+    version="2.4.0", # Incremented version
     lifespan=lifespan
 )
 
@@ -260,12 +253,7 @@ class DatabaseManager:
             raise
     
     @staticmethod
-    def get_document_chunks(db: Session, document_id: uuid.UUID) -> List[DocumentChunk]:
-        """Get all chunks for a document"""
-        return db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).all()
-    
-    @staticmethod
-    def search_similar_chunks(db: Session, query_embedding: List[float], limit: int = 15) -> List[DocumentChunk]:
+    def search_similar_chunks(db: Session, query_embedding: List[float], limit: int = SIMILAR_CHUNKS_LIMIT) -> List[DocumentChunk]:
         """Search for similar chunks using vector similarity with more results"""
         try:
             # Use pgvector's cosine similarity with increased limit
@@ -333,7 +321,7 @@ class PDFProcessor:
 class ImprovedTextChunker:
     """Enhanced text chunking with better strategies for legal documents"""
     
-    def __init__(self, chunk_size: int = 800, overlap: int = 150):
+    def __init__(self, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
         # Improved separators for legal/constitutional documents
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -400,161 +388,37 @@ class ImprovedTextChunker:
         
         return chunk
 
-class EnhancedHybridVectorStore:
-    """Enhanced hybrid vector storage with improved search strategies"""
+class VectorStoreManager:
+    """Handles vector search and retrieval from the PostgreSQL database."""
     
-    def __init__(self):
-        self.namespace = "insurance_docs"
-    
-    def search_postgresql_enhanced(self, db: Session, query: str, limit: int = 15) -> List[str]:
-        """Enhanced PostgreSQL search with query expansion"""
+    def search(self, db: Session, query: str, limit: int = SIMILAR_CHUNKS_LIMIT) -> List[str]:
+        """
+        Performs vector similarity search in the database.
+        
+        Args:
+            db: The database session.
+            query: The user's question.
+            limit: The maximum number of chunks to retrieve.
+            
+        Returns:
+            A list of relevant text chunks.
+        """
         try:
-            # Generate embeddings for original query
-            original_embedding = embedding_model.encode([query])[0].tolist()
-            
-            # Get similar chunks
-            chunks = DatabaseManager.search_similar_chunks(db, original_embedding, limit)
-            
-            # Extract content and log similarity scores for debugging
-            results = []
-            for chunk in chunks:
-                results.append(chunk.content)
-            
-            logger.info(f"PostgreSQL search found {len(results)} chunks for query: '{query[:50]}...'")
-            return results
-            
-        except Exception as e:
-            logger.error(f"PostgreSQL search failed: {e}")
-            return []
-    
-    def search_pinecone_enhanced(self, query: str, limit: int = 10) -> List[str]:
-        """Enhanced Pinecone search with multiple query strategies"""
-        try:
+            # Generate an embedding for the user's query
             query_embedding = embedding_model.encode([query])[0].tolist()
             
-            results = pinecone_index.query(
-                vector=query_embedding,
-                top_k=limit,
-                namespace=self.namespace,
-                include_metadata=True
-            )
+            # Retrieve the most similar chunks from the database
+            chunks = DatabaseManager.search_similar_chunks(db, query_embedding, limit)
             
-            documents = []
-            for match in results.matches:
-                if 'text' in match.metadata:
-                    documents.append(match.metadata['text'])
+            # Extract the text content from the chunk objects
+            results = [chunk.content for chunk in chunks]
             
-            logger.info(f"Pinecone search found {len(documents)} chunks")
-            return documents
-            
-        except Exception as e:
-            logger.error(f"Pinecone search failed: {e}")
-            return []
-    
-    def multi_query_search(self, db: Session, original_query: str) -> List[str]:
-        """Search using multiple query variations for better coverage"""
-        all_results = set()
-        
-        # Original query
-        results1 = self.search_postgresql_enhanced(db, original_query, limit=10)
-        all_results.update(results1)
-        
-        # Query variations for better coverage
-        query_variations = self.generate_query_variations(original_query)
-        
-        for variation in query_variations[:2]:  # Limit to 2 variations to avoid too many results
-            results = self.search_postgresql_enhanced(db, variation, limit=5)
-            all_results.update(results)
-        
-        # Convert back to list and limit
-        final_results = list(all_results)[:15]  # Increased limit
-        logger.info(f"Multi-query search found {len(final_results)} unique chunks")
-        
-        return final_results
-    
-    def generate_query_variations(self, query: str) -> List[str]:
-        """Generate query variations for better retrieval"""
-        variations = []
-        
-        # Extract key terms
-        key_terms = self.extract_key_terms(query)
-        
-        if key_terms:
-            # Create variations with key terms
-            variations.append(" ".join(key_terms))
-            
-            # Create individual key term queries
-            for term in key_terms[:2]:  # Limit to top 2 key terms
-                variations.append(term)
-        
-        return variations
-    
-    def extract_key_terms(self, query: str) -> List[str]:
-        """Extract key terms from query"""
-        import re
-        
-        # Remove common stop words
-        stop_words = {'what', 'is', 'the', 'how', 'does', 'are', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
-        
-        # Extract words (keep important terms like Article, Constitution, etc.)
-        words = re.findall(r'\b[A-Za-z]+\b', query.lower())
-        key_terms = [word for word in words if word not in stop_words and len(word) > 2]
-        
-        # Prioritize legal/constitutional terms
-        priority_terms = ['constitution', 'article', 'amendment', 'rights', 'fundamental', 'directive', 'principles', 'president', 'supreme', 'court', 'parliament', 'state', 'emergency']
-        
-        prioritized = []
-        for term in priority_terms:
-            if term in key_terms:
-                prioritized.append(term)
-        
-        # Add remaining terms
-        for term in key_terms:
-            if term not in prioritized:
-                prioritized.append(term)
-        
-        return prioritized[:5]  # Return top 5 key terms
-    
-    def hybrid_search_enhanced(self, db: Session, query: str) -> List[str]:
-        """Enhanced hybrid search with multiple strategies"""
-        # Try multi-query search first
-        results = self.multi_query_search(db, query)
-        
-        if results:
-            logger.info(f"Enhanced search found {len(results)} results from PostgreSQL")
+            logger.info(f"Vector search found {len(results)} chunks for query: '{query[:50]}...'")
             return results
-        else:
-            logger.info("No results from PostgreSQL, trying Pinecone fallback")
-            return self.search_pinecone_enhanced(query, limit=15)
-    
-    def add_to_pinecone_fallback(self, chunks: List[str]):
-        """Add chunks to Pinecone as fallback"""
-        try:
-            embeddings = embedding_model.encode(chunks)
-            batch_size = 20
             
-            for batch_idx in range(0, len(chunks), batch_size):
-                batch_end = min(batch_idx + batch_size, len(chunks))
-                batch_chunks = chunks[batch_idx:batch_end]
-                batch_embeddings = embeddings[batch_idx:batch_end]
-                
-                vectors = []
-                for i, (chunk, embedding) in enumerate(zip(batch_chunks, batch_embeddings)):
-                    vectors.append({
-                        "id": f"chunk_{batch_idx + i}_{hash(chunk) % 1000000}",
-                        "values": embedding.tolist(),
-                        "metadata": {
-                            "text": chunk,
-                            "chunk_id": batch_idx + i,
-                            "text_length": len(chunk)
-                        }
-                    })
-                
-                pinecone_index.upsert(vectors=vectors, namespace=self.namespace)
-            
-            logger.info(f"Added {len(chunks)} chunks to Pinecone fallback")
         except Exception as e:
-            logger.error(f"Failed to add to Pinecone fallback: {e}")
+            logger.error(f"Vector search failed: {e}")
+            return []
 
 class ImprovedLLMProcessor:
     """Enhanced LLM processor with better prompting and context handling using Gemini"""
@@ -591,12 +455,33 @@ Based *only* on the provided context chunks, answer each question.
                 )
             )
 
+            # Check for blocked response before accessing .text
+            if not response.parts:
+                finish_reason = response.candidates[0].finish_reason if response.candidates else 'UNKNOWN'
+                logger.error(f"Gemini response was blocked. Finish Reason: {finish_reason}")
+                # Check prompt feedback if available
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                     logger.error(f"Prompt Feedback Block Reason: {response.prompt_feedback.block_reason}")
+                return [f"Error: Response blocked by safety settings (Reason: {finish_reason})." for _ in questions]
+
             response_text = response.text
             logger.info(f"Generated answers for {len(questions)} questions")
             
             # Parse JSON response
             return self.parse_response(response_text, questions)
             
+        except ValueError as e:
+             # This will catch the "no valid Part" error if the response was blocked.
+            logger.error(f"Gemini response was likely blocked or empty: {e}")
+            # Try to get more detailed feedback from the response object
+            try:
+                finish_reason = response.candidates[0].finish_reason if response.candidates else 'UNKNOWN'
+                logger.error(f"Finish Reason: {finish_reason}")
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                     logger.error(f"Prompt Feedback Block Reason: {response.prompt_feedback.block_reason}")
+                return [f"Error: Response blocked by API (Reason: {finish_reason})." for _ in questions]
+            except (AttributeError, IndexError):
+                 return [f"Error: Invalid or empty response from API." for _ in questions]
         except Exception as e:
             logger.error(f"Failed to generate answers with Gemini: {e}")
             return [f"Error processing question: {str(e)}" for _ in questions]
@@ -674,7 +559,7 @@ Based *only* on the provided context chunks, answer each question.
 # Initialize improved processors
 pdf_processor = PDFProcessor()
 text_chunker = ImprovedTextChunker()
-hybrid_vector_store = EnhancedHybridVectorStore()
+vector_store = VectorStoreManager()
 llm_processor = ImprovedLLMProcessor()
 
 # Create router
@@ -694,9 +579,7 @@ async def process_documents(
         # Step 1: Check cache
         cached_document = DatabaseManager.get_document_by_url(db, url)
         
-        if cached_document:
-            logger.info(f"✅ Document found in cache with {cached_document.chunk_count} chunks")
-        else:
+        if not cached_document:
             logger.info("❌ Document not in cache. Processing new document...")
             
             # Extract and process document
@@ -714,11 +597,10 @@ async def process_documents(
             logger.info(f"Created {len(chunks)} enhanced chunks")
             
             # Save to database
-            cached_document = DatabaseManager.save_document(db, url, text, chunks)
-            
-            # Add to Pinecone fallback
-            hybrid_vector_store.add_to_pinecone_fallback(chunks)
-        
+            DatabaseManager.save_document(db, url, text, chunks)
+        else:
+            logger.info(f"✅ Document found in cache with {cached_document.chunk_count} chunks")
+
         # Step 2: Enhanced question processing
         logger.info("Processing questions with enhanced retrieval...")
         
@@ -727,13 +609,13 @@ async def process_documents(
         
         for question in request.questions:
             logger.info(f"Searching for: {question[:50]}...")
-            relevant_chunks = hybrid_vector_store.hybrid_search_enhanced(db, question)
-            all_relevant_chunks.update(relevant_chunks[:5])  # Top 5 per question
+            relevant_chunks = vector_store.search(db, question, limit=MULTI_QUERY_CHUNKS_PER_QUERY)
+            all_relevant_chunks.update(relevant_chunks)
         
         # Final chunk selection
-        final_chunks = list(all_relevant_chunks)[:20]  # Increased limit for better context
+        final_chunks = list(all_relevant_chunks)[:FINAL_CONTEXT_CHUNKS]
         
-        logger.info(f"Selected {len(final_chunks)} chunks for context")
+        logger.info(f"Selected {len(final_chunks)} unique chunks for context")
         
         if not final_chunks:
             answers = ["No relevant information found in the document." for _ in request.questions]
@@ -774,7 +656,7 @@ async def cache_stats(db: Session = Depends(get_db)):
             "cached_documents": total_docs,
             "total_chunks": total_chunks,
             "cache_status": "active",
-            "version": "2.3.1 - Gemini 2.5 Flash"
+            "version": "2.4.0 - Refactored"
         }
     except Exception as e:
         return {"error": str(e)}
@@ -787,16 +669,13 @@ async def root():
     """Root endpoint"""
     return {
         "message": "HackRx Enhanced RAG API with Google Gemini 2.5 Flash",
-        "version": "2.3.1",
-        "llm_model": "gemini-1.5-flash-latest (as alias for 2.5)",
+        "version": "2.4.0",
+        "llm_model": "gemini-1.5-flash-latest",
         "improvements": [
-            "Updated to target Gemini 2.5 Flash technology",
-            "Switched from OpenAI GPT to Google Gemini Flash",
-            "Better text chunking for legal documents",
-            "Enhanced query expansion and search",
-            "Improved context formatting and prompting for Gemini",
-            "Enabled native JSON output mode for reliable responses",
-            "Multi-query search strategies"
+            "Simplified architecture to focus on PostgreSQL/pgvector",
+            "Centralized configuration for chunking and retrieval",
+            "Refined system prompt for better reliability",
+            "Robust error handling for blocked API responses"
         ],
         "endpoints": {
             "process": "/api/v1/hackrx/run",
