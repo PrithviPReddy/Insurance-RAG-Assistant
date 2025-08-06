@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
         
         genai.configure(api_key=GOOGLE_API_KEY)
         
-        # System instructions for the model - Reverted to user's preferred template
+        # System instructions for the model
         system_instruction = '''You are an expert assistant specializing in legal and policy documents or any documents in general.
 
         -> You are being tested for your RAG capability.
@@ -148,20 +148,12 @@ Respond in valid JSON format:
   ]
 }'''
         
-        # Safety settings to be less restrictive for general document processing
-        safety_settings = {
-            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-        }
-
         # Configure the Gemini model with system instructions and to output JSON
+        # Safety settings have been removed as per user request.
         gemini_model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
             system_instruction=system_instruction,
-            generation_config={"response_mime_type": "application/json"},
-            safety_settings=safety_settings
+            generation_config={"response_mime_type": "application/json"}
         )
         
         logger.info("All services initialized successfully")
@@ -177,7 +169,7 @@ Respond in valid JSON format:
 app = FastAPI(
     title="HackRx RAG API with Gemini 2.5 Flash",
     description="Enhanced RAG system with Gemini 2.5 Flash for insurance policy document processing",
-    version="2.3.2", # Incremented version
+    version="2.3.3", # Incremented version
     lifespan=lifespan
 )
 
@@ -598,21 +590,24 @@ Based *only* on the provided context chunks, answer each question.
                 )
             )
 
-            # Check for blocked response before accessing .text
-            if not response.parts:
-                finish_reason = response.candidates[0].finish_reason if response.candidates else 'UNKNOWN'
-                logger.error(f"Gemini response was blocked. Finish Reason: {finish_reason}")
-                # Check prompt feedback if available
-                if response.prompt_feedback and response.prompt_feedback.block_reason:
-                     logger.error(f"Prompt Feedback Block Reason: {response.prompt_feedback.block_reason}")
-                return [f"Error: Response blocked by safety settings (Reason: {finish_reason})." for _ in questions]
-
             response_text = response.text
             logger.info(f"Generated answers for {len(questions)} questions")
             
             # Parse JSON response
             return self.parse_response(response_text, questions)
             
+        except ValueError as e:
+             # This will catch the "no valid Part" error if the response was blocked.
+            logger.error(f"Gemini response was likely blocked or empty: {e}")
+            # Try to get more detailed feedback from the response object
+            try:
+                finish_reason = response.candidates[0].finish_reason if response.candidates else 'UNKNOWN'
+                logger.error(f"Finish Reason: {finish_reason}")
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                     logger.error(f"Prompt Feedback Block Reason: {response.prompt_feedback.block_reason}")
+                return [f"Error: Response blocked by API (Reason: {finish_reason})." for _ in questions]
+            except (AttributeError, IndexError):
+                 return [f"Error: Invalid or empty response from API." for _ in questions]
         except Exception as e:
             logger.error(f"Failed to generate answers with Gemini: {e}")
             return [f"Error processing question: {str(e)}" for _ in questions]
@@ -790,7 +785,7 @@ async def cache_stats(db: Session = Depends(get_db)):
             "cached_documents": total_docs,
             "total_chunks": total_chunks,
             "cache_status": "active",
-            "version": "2.3.2 - Gemini 2.5 Flash"
+            "version": "2.3.3 - Gemini 2.5 Flash"
         }
     except Exception as e:
         return {"error": str(e)}
@@ -803,8 +798,8 @@ async def root():
     """Root endpoint"""
     return {
         "message": "HackRx Enhanced RAG API with Google Gemini 2.5 Flash",
-        "version": "2.3.2",
-        "llm_model": "gemini-1.5-flash-latest (as alias for 2.5)",
+        "version": "2.3.3",
+        "llm_model": "gemini-2.5-flash (as alias for 2.5)",
         "improvements": [
             "Updated to target Gemini 2.5 Flash technology",
             "Switched from OpenAI GPT to Google Gemini Flash",
