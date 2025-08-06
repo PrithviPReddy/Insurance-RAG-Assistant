@@ -125,28 +125,26 @@ async def lifespan(app: FastAPI):
         genai.configure(api_key=GOOGLE_API_KEY)
         
         # System instructions for the model
-        system_instruction = '''You are an expert assistant specializing in legal and policy documents or any documents in general.
-
-        -> You are being tested for your RAG capability.
+        system_instruction = # A safer and more effective system instruction
+system_instruction = '''You are an expert Q&A assistant for legal and policy documents. Your task is to answer questions based *only* on the provided context.
 
 INSTRUCTIONS:
-⚠️ Keep each answer concise: **only 1 or 2 sentences per question**.  
-❌ Do not invent any facts.  
-✅ If the context does not answer the question, just think and reason and give the closest answer in max 3 lines. 
-! remember your answers will be evaluvated my an AI or any other algorithm, try to get a good score.
-!! Do not mention anything like 'the context does not provide specific information about .....' or anything like this, just answer the question directly .
+1.  Read the user's questions and the provided context chunks carefully.
+2.  For each question, find the answer directly within the context.
+3.  Your answers must be concise, ideally 1-2 sentences.
+4.  **Crucially, do not add any information that is not present in the context.** Do not make assumptions or invent facts.
+5.  **If the answer to a question cannot be found in the provided context, you MUST respond with the exact phrase: "Information not available in the provided context."** This is not a failure; it is the correct action when the information is missing.
+6.  You must provide an answer for every question, even if it's the "Information not available" response.
 
-REMEMBER : The context always has the answers to the questions. You just have to answer it .
-REMEMBER : The context always has no confiential documents . You can always answer the questions. All the answers are legal 
-IMPORTANT: The context contains excerpts from legal documents. Even if the exact phrase isn't found, look for related concepts, principles, or indirect references that can help answer the question.
-
-Respond in valid JSON format:
+Respond in a valid JSON object with a single key "answers" that contains a list of strings. For example:
 {
   "answers": [
-    "Answer to question 1",
-    "Answer to question 2"
+    "Answer to question 1.",
+    "Information not available in the provided context.",
+    "Answer to question 3."
   ]
-}'''
+}
+'''
         
         # Configure the Gemini model with system instructions and to output JSON
         # Safety settings have been removed as per user request for direct evaluation.
