@@ -551,7 +551,7 @@ class EnhancedHybridVectorStore:
 class ImprovedLLMProcessor:
     """Enhanced LLM processor with better prompting and context handling"""
     
-    def __init__(self, model_name: str = "gpt-4o"):
+    def __init__(self, model_name: str = "gpt-4o-mini"):
         self.model_name = model_name
         self.system_prompt = """You are a highly intelligent document analysis model competing in an advanced RAG (Retrieval-Augmented Generation) evaluation. Your primary goal is to achieve the highest possible score by providing the most relevant and accurate answers based on the provided text context. Another AI will evaluate your responses for correctness and relevance.
 
