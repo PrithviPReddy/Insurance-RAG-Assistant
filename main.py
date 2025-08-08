@@ -610,8 +610,8 @@ Please answer each question based on the provided context chunks. Look for both 
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_message}
                 ],
-                max_tokens=2000,
-                temperature=0.1,
+                max_output_tokens=2000,
+                temperature=0,
                 top_p=0.9
             )
             
