@@ -557,6 +557,7 @@ class ImprovedLLMProcessor:
 
 **CORE DIRECTIVE:**
 The context provided is guaranteed to contain all the necessary information, clues, or related principles to answer every single question. Your task is to find and synthesize them.
+Remeber to always answer in max 2 to 3 lines
 
 **CRITICAL RULES FOR SCORING HIGH:**
 
