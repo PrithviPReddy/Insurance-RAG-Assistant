@@ -611,8 +611,8 @@ Please answer each question based on the provided context chunks. Look for both 
                     {"role": "user", "content": user_message}
                 ],
                 # max_output_tokens=2000,
-                temperature=0,
-                top_p=0.9
+                # temperature=0,
+                # top_p=0.9
             )
             
             response_text = response.choices[0].message.content.strip()
