@@ -749,7 +749,7 @@ def solve_hackrx_puzzle() -> ProcessResponse:
     
     try:
         # Step 1: Call the flight API directly
-        flight_url = "https://register.hackrx.in/teams/public/flights/getFifthCityFlightNumber]"
+        flight_url = "https://register.hackrx.in/teams/public/flights/getFifthCityFlightNumber"
         logger.info(f"[Puzzle Step 1] Getting flight number from {flight_url}")
         
         flight_response = requests.get(flight_url)
