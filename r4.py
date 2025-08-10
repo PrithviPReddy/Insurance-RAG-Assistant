@@ -570,7 +570,7 @@ class EnhancedHybridVectorStore:
 class ImprovedLLMProcessor:
     """Enhanced LLM processor with better prompting and context handling"""
     
-    def __init__(self, model_name: str = "gpt-5"): # Using a more modern, capable model
+    def __init__(self, model_name: str = "gpt-4o"): # Using a more modern, capable model
         self.model_name = model_name
         self.system_prompt = """You are a world-class legal and policy document analyst AI. Your sole purpose is to win a competitive RAG evaluation by providing the most accurate and concise answers based *only* on the provided text context. Your responses will be judged by another algorithm for accuracy and efficiency.
 
@@ -630,7 +630,7 @@ Please answer each question based on the provided context chunks. Look for both 
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_message}
                 ],
-                temperature=0, # Set to 0 for deterministic output in evaluations
+                # temperature=0, # <-- THIS LINE WAS REMOVED TO FIX THE ERROR
             )
             
             response_text = response.choices[0].message.content.strip()
@@ -749,7 +749,7 @@ def solve_hackrx_puzzle() -> ProcessResponse:
     
     try:
         # Step 1: Call the flight API directly
-        flight_url = "https://register.hackrx.in/teams/public/flights/getFifthCityFlightNumber"
+        flight_url = "[https://register.hackrx.in/teams/public/flights/getFifthCityFlightNumber](https://register.hackrx.in/teams/public/flights/getFifthCityFlightNumber)"
         logger.info(f"[Puzzle Step 1] Getting flight number from {flight_url}")
         
         flight_response = requests.get(flight_url)
