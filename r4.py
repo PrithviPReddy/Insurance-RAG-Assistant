@@ -570,7 +570,7 @@ class EnhancedHybridVectorStore:
 class ImprovedLLMProcessor:
     """Enhanced LLM processor with better prompting and context handling"""
     
-    def __init__(self, model_name: str = "gpt-4o"): # Using a more modern, capable model
+    def __init__(self, model_name: str = "gpt-5-mini"): # Using a more modern, capable model
         self.model_name = model_name
         self.system_prompt = """You are a world-class legal and policy document analyst AI. Your sole purpose is to win a competitive RAG evaluation by providing the most accurate and concise answers based *only* on the provided text context. Your responses will be judged by another algorithm for accuracy and efficiency.
 
