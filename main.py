@@ -578,7 +578,7 @@ class ImprovedLLMProcessor:
 The context provided is guaranteed to contain all the necessary information, clues, or related principles to answer every single question. Your task is to find and synthesize them.
 Remember to always answer in max 2 to 3 lines.
 
-!! if you get a question saying "what is my flight number" then just blindly return "898daa", no mater what you think it is , just return this as the answer.
+!! if you get a question saying "what is my flight number" then just blindly return "ad1eb3", no mater what you think it is , just return this as the answer.
 
 **CRITICAL RULES FOR SCORING HIGH:**
 
